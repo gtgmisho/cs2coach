@@ -6,7 +6,7 @@ mode. Exclusive fullscreen hides every other window, so put it on a second monit
 
 Layout:
     ┌──────────────────────────────────────────────┐
-    │          Купи пълен сет, пази B               │  <- large centred command
+    │            Buy full set, hold B               │  <- large centred command
     ├──────────────────────────────────────────────┤
     │ ● GSI   ● LM Studio: qwen2.5   HP 100  $4750 │  <- status bar
     └──────────────────────────────────────────────┘
@@ -70,7 +70,7 @@ class Overlay:
 
         # The single large instruction field.
         self.instruction = tk.Label(
-            self.root, text="Чакам CS2...", font=self.big_font,
+            self.root, text="Waiting for CS2...", font=self.big_font,
             fg=LEVEL_COLORS["info"], bg=BG_COLOR, padx=24, pady=14, justify="center",
         )
         self.instruction.pack(fill="both", expand=True)
@@ -213,7 +213,6 @@ class Overlay:
             self.status_bar.pack(fill="x")
 
     def _pick_font(self) -> str:
-        # All of these include Cyrillic glyphs.
         available = set(tkfont.families(self.root))
         for name in ("Segoe UI", "Helvetica Neue", "DejaVu Sans", "Arial"):
             if name in available:
@@ -227,5 +226,5 @@ if __name__ == "__main__":
         ("● CS2 GSI", GREEN), ("● LM Studio: demo-model", GREEN),
         ("HP 64   $1850", MUTED), ("AI", MUTED),
     ])
-    demo.post("Спаси оръжието, ротирай B", "warn")
+    demo.post("Save weapons & rotate B", "warn")
     demo.run()

@@ -1,11 +1,11 @@
 # CS2 AI Coach
 
-A read-only, real-time CS2 coach that runs **entirely on your PC**. CS2 streams its game state to the app, a **local LLM in LM Studio** turns it into a short Bulgarian IGL command, and a floating window on your second monitor shows it.
+A read-only, real-time CS2 coach that runs **entirely on your PC**. CS2 streams its game state to the app, a **local LLM in LM Studio** turns it into a short IGL command, and a floating window on your second monitor shows it.
 
 ```
 CS2 ──GSI (HTTP POST)──▶ coach_app.py :3000 ──▶ LM Studio :1234 (local LLM)
                               │                        │
-                              └──── overlay window ◀───┘   "Купи пълен сет, пази B"
+                              └──── overlay window ◀───┘   "Buy full set, hold B"
 ```
 
 ## Safe for VAC / FACEIT
@@ -40,7 +40,7 @@ CS2 loads `gamestate_integration_*.cfg` files **automatically at startup**, so t
 
 ### 3. Start LM Studio
 
-1. In LM Studio, download and **load** a small *instruct* model that writes good Bulgarian. Good choices: **Gemma 3 4B/12B Instruct** or **Qwen2.5 7B Instruct**.
+1. In LM Studio, download and **load** a small *instruct* model. Good choices: **Llama 3.1 8B Instruct**, **Qwen2.5 7B Instruct** or **Gemma 3 4B Instruct**.
    *Avoid "thinking" models (Qwen3, DeepSeek-R1…) or switch thinking off: they spend the 35-token limit on reasoning and return nothing.*
 2. Open the **Developer** tab and click **Start Server** (default port `1234`).
 
@@ -66,7 +66,7 @@ python coach_app.py --geometry +1920+40
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│               Купи пълен сет, пази B                  │
+│                 Buy full set, hold B                  │
 ├───────────────────────────────────────────────────────┤
 │ ● CS2 GSI  ● LM Studio: gemma-3-4b  HP 100  $4750  AI │
 └───────────────────────────────────────────────────────┘
@@ -99,7 +99,7 @@ cs2coach/gsi_server.py   ThreadingHTTPServer on 127.0.0.1:3000 (background threa
 cs2coach/state.py        GSI JSON → GameSnapshot
 cs2coach/trigger.py      filtering & debouncing: when to ask the AI
 cs2coach/llm.py          LM Studio client, IGL system prompt, background LLM worker
-cs2coach/coach.py        instant Bulgarian rule-based fallback
+cs2coach/coach.py        instant rule-based fallback
 cs2coach/overlay.py      tkinter dark always-on-top window (theme.py = colours)
 tools/send_test_payload.py   fake CS2: replays a scripted round
 tests/fake_lmstudio.py       fake LM Studio for testing without a GPU
@@ -153,7 +153,7 @@ python -m unittest discover -s tests -v
 * **`● LM Studio: offline`:** the LM Studio server isn't started (Developer tab → Start Server) or uses a different port (`--lmstudio-url`).
 * **`● LM Studio: no model loaded`:** load a model in LM Studio.
 * **`● LM Studio: timeout` / slow answers:** use a smaller model, or raise `--llm-timeout`. The first request after loading can be slow.
-* **AI answers in English or are too long:** use a stronger multilingual model (Gemma 3, Qwen2.5). Replies are trimmed to one line of at most 8 words.
+* **AI answers are vague or too long:** try a stronger instruct model (Llama 3.1 8B, Qwen2.5 7B). Replies are trimmed to one line of at most 8 words.
 * **"Ignoring a payload with a missing or wrong auth token":** the `.cfg` token and `--token` differ.
 
 ## Limits

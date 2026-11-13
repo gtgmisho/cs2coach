@@ -14,7 +14,7 @@ Data flow (every arrow is a separate, non-blocking hand-off):
                                                │  AnalysisTrigger: meaningful change?
                                                ▼
                                    LLMWorker thread ──HTTP──▶ LM Studio (127.0.0.1:1234)
-                                               │  short Bulgarian IGL command
+                                               │  short IGL command
                                                ▼
                                    Overlay (Tk main thread, via queue)
 
@@ -219,7 +219,7 @@ def parse_args(argv=None) -> argparse.Namespace:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
-    # Bulgarian text must never crash printing on a non-UTF-8 console/redirect.
+    # Non-ASCII model output must never crash printing on a non-UTF-8 console/redirect.
     for stream in (sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             stream.reconfigure(encoding="utf-8", errors="replace")

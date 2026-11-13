@@ -27,28 +27,26 @@ from .state import GameSnapshot
 
 log = logging.getLogger(__name__)
 
-# Written in English because small local models follow English instructions
-# best. The OUTPUT is required to be Bulgarian.
 SYSTEM_PROMPT = """\
 You are an elite Counter-Strike 2 in-game leader (IGL) coaching ONE player in real time.
 You receive a short report of that player's current game state.
 
-Reply with exactly ONE tactical command, written in Bulgarian:
+Reply with exactly ONE tactical command in English:
 - 4 to 6 words maximum.
-- Start with an imperative action verb (Купи, Пази, Играй, Ротирай, Спаси, Чакай, Влез, Дефузни, Пести, Отстъпи...).
-- CS2 jargon may stay in English (rush, eco, force, AWP, smoke, flash, crossfire, retake).
-- Output ONLY the command: no explanation, no quotes, no emojis, no English sentences.
+- Start with an imperative action verb (Buy, Hold, Play, Rotate, Save, Wait, Push, Defuse, Retake, Fall back...).
+- Use normal CS2 jargon (rush, eco, force, AWP, smoke, flash, crossfire, retake, trade).
+- Output ONLY the command: no explanation, no quotes, no emojis.
 
 Decide from: side (CT defends sites, T attacks and plants), round phase, economy, HP and armor,
 weapons, bomb state and score. In freezetime give a buy call. After a plant, play post-plant (T)
 or retake/defuse (CT). With low HP or a bad gun, play for info or save.
 
 Examples of valid replies:
-Купи пълен сет, пази B
-Бърз rush през A
-Спаси оръжието, не влизай
-Дефузни веднага, имаш кит
-Пести парите, eco рунд"""
+Buy full set, hold B
+Rush A fast together
+Save your rifle, don't retake
+Defuse now, you have kit
+Save money, eco round"""
 
 _PHASE_TEXT = {
     "freezetime": "freezetime (buy phase)",
@@ -116,7 +114,7 @@ def build_state_report(s: GameSnapshot) -> str:
 
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.S | re.I)
-_LEADING_JUNK = re.compile(r"^(?:[-*•>#]+\s*|\d+[.)]\s*|(?:команда|command|отговор|answer)\s*:\s*)+", re.I)
+_LEADING_JUNK = re.compile(r"^(?:[-*•>#]+\s*|\d+[.)]\s*|(?:command|answer|reply)\s*:\s*)+", re.I)
 _QUOTES = "\"'`«»„“”*_ "
 
 
@@ -239,7 +237,7 @@ class LMStudioClient:
         return ids[0]
 
     def get_command(self, report: str, model: str) -> str:
-        """Ask the model for one short Bulgarian command. Raises LLMError."""
+        """Ask the model for one short English command. Raises LLMError."""
         body = {
             "model": model,
             "messages": [

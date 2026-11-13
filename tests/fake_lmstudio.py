@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 class FakeLMStudio:
     def __init__(
         self,
-        reply: str = "Купи пълен сет, пази B",
+        reply: str = "Buy full set, hold B",
         delay: float = 0.0,
         status: int = 200,
         native_api: bool = True,
@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", type=int, default=1234)
-    ap.add_argument("--reply", default="Купи пълен сет, пази B")
+    ap.add_argument("--reply", default="Buy full set, hold B")
     ap.add_argument("--delay", type=float, default=0.5)
     a = ap.parse_args()
     fake = FakeLMStudio(reply=a.reply, delay=a.delay, port=a.port).start()

@@ -45,14 +45,14 @@ def wait_for(predicate, timeout=3.0):
 class CleanCommandTests(unittest.TestCase):
     def test_cleaning(self):
         cases = {
-            "Купи пълен сет, пази B": "Купи пълен сет, пази B",
-            '"Бърз rush през A."': "Бърз rush през A",
-            "Команда: Пази B\nОбяснение: ...": "Пази B",
-            "- **Спаси оръжието**": "Спаси оръжието",
-            "<think>hmm</think>\nДефузни веднага": "Дефузни веднага",
+            "Buy full set, hold B": "Buy full set, hold B",
+            '"Rush A fast together."': "Rush A fast together",
+            "Command: Hold B\nExplanation: ...": "Hold B",
+            "- **Save your rifle**": "Save your rifle",
+            "<think>hmm</think>\nDefuse now": "Defuse now",
             "<think>still thinking and cut off": "",
             "": "",
-            "едно две три четири пет шест седем осем девет десет": "едно две три четири пет шест седем осем",
+            "one two three four five six seven eight nine ten": "one two three four five six seven eight",
         }
         for raw, expected in cases.items():
             self.assertEqual(clean_command(raw), expected, raw)
@@ -82,11 +82,11 @@ class ClientTests(unittest.TestCase):
         c = LMStudioClient(self.fake.url + "/v1/chat/completions")  # full URL is accepted too
         model = c.detect_model()
         self.assertEqual(model, "test-model")       # embeddings model skipped
-        self.assertEqual(c.get_command("report", model), "Купи пълен сет, пази B")
+        self.assertEqual(c.get_command("report", model), "Buy full set, hold B")
         body = self.fake.requests[-1]
         self.assertEqual(body["temperature"], 0.3)
         self.assertEqual(body["max_tokens"], 35)
-        self.assertIn("Bulgarian", body["messages"][0]["content"])
+        self.assertIn("in English", body["messages"][0]["content"])
         self.assertEqual(body["messages"][1], {"role": "user", "content": "report"})
 
     def test_no_model_loaded(self):
@@ -137,7 +137,7 @@ class WorkerTests(unittest.TestCase):
                 w.start()
                 self.assertTrue(wait_for(lambda: w.status.usable))
                 w.submit(AnalysisJob("report", ("k",), "test"))
-                self.assertTrue(wait_for(lambda: results == ["Купи пълен сет, пази B"]))
+                self.assertTrue(wait_for(lambda: results == ["Buy full set, hold B"]))
         finally:
             fake.stop()
 
@@ -155,7 +155,7 @@ class AppTests(unittest.TestCase):
     """CoachApp with a real worker against the fake LM Studio (console mode)."""
 
     def setUp(self):
-        self.fake = FakeLMStudio(reply="Дефузни веднага, имаш кит", delay=0.2).start()
+        self.fake = FakeLMStudio(reply="Defuse now, you have kit", delay=0.2).start()
         self.app = CoachApp()
         self.app.worker = LLMWorker(LMStudioClient(self.fake.url), self.app.on_llm_result,
                                     health_interval=0.2)
@@ -180,8 +180,8 @@ class AppTests(unittest.TestCase):
     def test_rules_first_then_ai(self):
         frames = scripted_round()
         self.app.on_payload(frames[0])                       # freezetime
-        self.assertEqual(self.shown[0], "Купи пълен сет и кит")   # instant rule text
-        self.assertTrue(wait_for(lambda: self.shown[-1] == "Дефузни веднага, имаш кит"))
+        self.assertEqual(self.shown[0], "Buy full set and kit")   # instant rule text
+        self.assertTrue(wait_for(lambda: self.shown[-1] == "Defuse now, you have kit"))
         self.assertEqual(len(self.fake.requests), 1)
 
         # Ammo/money-only changes in the same situation: no new request, AI text kept.
@@ -189,7 +189,7 @@ class AppTests(unittest.TestCase):
         self.app.on_payload(p)
         time.sleep(0.3)
         self.assertEqual(len(self.fake.requests), 1)
-        self.assertEqual(self.shown[-1], "Дефузни веднага, имаш кит")
+        self.assertEqual(self.shown[-1], "Defuse now, you have kit")
 
         segs = dict(self.app.status_segments())
         self.assertIn("● CS2 GSI", segs)
@@ -203,7 +203,7 @@ class AppTests(unittest.TestCase):
         time.sleep(0.8)
         # Both answers arrive; only the one matching the live situation may be shown.
         self.assertEqual(len(self.fake.requests), 2)
-        self.assertEqual(self.shown.count("Дефузни веднага, имаш кит"), 1)
+        self.assertEqual(self.shown.count("Defuse now, you have kit"), 1)
 
     def test_burst_of_payloads_is_debounced(self):
         threads = [threading.Thread(target=self.app.on_payload, args=(BASE,)) for _ in range(20)]

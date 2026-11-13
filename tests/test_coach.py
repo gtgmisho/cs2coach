@@ -80,9 +80,13 @@ class ServerTests(unittest.TestCase):
 
     def test_rejects_wrong_token(self):
         bad = dict(BASE, auth={"token": "nope"})
-        with self.assertRaises(urllib.error.HTTPError) as ctx:
+        # assertLogs captures the server's expected warning so it isn't printed.
+        with self.assertLogs("cs2coach.gsi_server", level="WARNING") as logs, \
+                self.assertRaises(urllib.error.HTTPError) as ctx:
             self._post(bad)
+        ctx.exception.close()  # release the response, avoids a ResourceWarning
         self.assertEqual(ctx.exception.code, 403)
+        self.assertIn("auth token", logs.output[0])
         self.assertEqual(self.received, [])
 
 

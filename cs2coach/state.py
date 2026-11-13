@@ -79,6 +79,12 @@ class GameSnapshot:
     # player_weapons
     weapons: List[Weapon] = field(default_factory=list)
 
+    # player_match_stats
+    kills: int = 0
+    assists: int = 0
+    deaths: int = 0
+    mvps: int = 0
+
     has_player_data: bool = False   # False on the main menu
 
     # ---- convenience views -------------------------------------------------
@@ -112,6 +118,10 @@ class GameSnapshot:
     @property
     def grenades(self) -> List[str]:
         return [w.short_name for w in self.weapons if w.type == "Grenade"]
+
+    @property
+    def has_bomb(self) -> bool:
+        return any(w.name == "weapon_c4" for w in self.weapons)
 
     @property
     def is_pistol_round(self) -> bool:
@@ -161,6 +171,7 @@ def parse_payload(payload: Dict[str, Any]) -> GameSnapshot:
     round_ = payload.get("round") or {}
     player = payload.get("player") or {}
     state = player.get("state") or {}
+    stats = player.get("match_stats") or {}
 
     return GameSnapshot(
         provider_steamid=str(provider.get("steamid", "")),
@@ -190,6 +201,10 @@ def parse_payload(payload: Dict[str, Any]) -> GameSnapshot:
         # GSI only includes "defusekit" when the player actually has one.
         has_defuse_kit=bool(state.get("defusekit", False)),
         weapons=_parse_weapons(player.get("weapons") or {}),
+        kills=_int(stats.get("kills")),
+        assists=_int(stats.get("assists")),
+        deaths=_int(stats.get("deaths")),
+        mvps=_int(stats.get("mvps")),
         has_player_data=bool(state),
     )
 
@@ -213,6 +228,7 @@ def format_summary(s: GameSnapshot) -> str:
         f"[{s.team or '?'} | {who}]",
         f"HP {s.health} AR {s.armor}{'+H' if s.helmet else ''}",
         f"${s.money}",
+        f"K/A/D {s.kills}/{s.assists}/{s.deaths}",
         f"weapon={weapon}",
         f"nades={','.join(s.grenades)}" if s.grenades else "",
         "KIT" if s.has_defuse_kit else "",

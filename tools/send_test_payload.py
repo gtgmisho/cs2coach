@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Send fake GSI payloads to the coach, so you can test it without launching CS2.
+"""Send fake GSI payloads to coach_app.py, so you can test it without launching CS2.
 
     python tools/send_test_payload.py              # play a short scripted round
     python tools/send_test_payload.py --delay 0.5  # faster
     python tools/send_test_payload.py --file my_payload.json   # replay a saved payload
 
-The payloads use the same shape CS2 sends with the provided .cfg.
+The payloads use the same shape CS2 sends with gamestate_integration_cs2coach.cfg.
 """
 
 from __future__ import annotations
@@ -31,6 +31,7 @@ BASE: Dict[str, Any] = {
         "state": {"health": 100, "armor": 0, "helmet": False, "flashed": 0, "smoked": 0,
                   "burning": 0, "money": 5200, "round_kills": 0, "round_killhs": 0,
                   "equip_value": 200},
+        "match_stats": {"kills": 4, "assists": 1, "deaths": 3, "mvps": 1, "score": 11},
         "weapons": {
             "weapon_0": {"name": "weapon_knife", "type": "Knife", "state": "holstered"},
             "weapon_1": {"name": "weapon_usp_silencer", "type": "Pistol", "state": "active",

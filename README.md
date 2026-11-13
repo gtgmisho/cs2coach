@@ -1,154 +1,161 @@
-# CS2 Coach
+# CS2 AI Coach
 
-A read-only, real-time coaching assistant for Counter-Strike 2. It runs locally on your PC.
+A read-only, real-time CS2 coach that runs **entirely on your PC**. CS2 streams its game state to the app, a **local LLM in LM Studio** turns it into a short Bulgarian IGL command, and a floating window on your second monitor shows it.
 
 ```
-CS2 ──(Game State Integration, HTTP POST)──▶ localhost:3000 ──▶ parser ──▶ rule-based coach
-                                                                     │              │
-                                                              console summary   floating overlay
+CS2 ──GSI (HTTP POST)──▶ coach_app.py :3000 ──▶ LM Studio :1234 (local LLM)
+                              │                        │
+                              └──── overlay window ◀───┘   "Купи пълен сет, пази B"
 ```
 
-* **Data source:** Valve's official [Game State Integration](https://developer.valvesoftware.com/wiki/Counter-Strike:_Global_Offensive_Game_State_Integration) (GSI) only. CS2 itself pushes JSON to a local web server.
-* **No dependencies:** Python standard library only (`http.server`, `json`, `threading`, `tkinter`).
-* **Overlay:** a normal, separate, always-on-top window. It never draws inside the game.
+## Safe for VAC / FACEIT
 
-## Why this is anti-cheat safe
-
-| What anti-cheat looks for | What CS2 Coach does |
+| | |
 |---|---|
-| Reading or writing game memory | ❌ Never. All data arrives from CS2 over HTTP via GSI |
-| Injecting DLLs / hooking DirectX to draw in-game | ❌ Never. The overlay is its own OS window |
-| Sending keyboard/mouse input | ❌ Never. It only displays text |
-| Modifying game files | ❌ Only adds a GSI `.cfg`, which Valve built for exactly this (it's how tournament HUDs, RGB keyboards and streaming tools work) |
+| Game data | Only Valve's official **Game State Integration** (GSI): CS2 itself sends JSON to `127.0.0.1`. This is the same mechanism tournament HUDs, RGB keyboards and streaming tools use |
+| Memory reading / injection | **None.** No process access, no DLLs, no hooks, no packet sniffing |
+| Input | **None.** It never sends keys or mouse movement |
+| Overlay | A normal separate desktop window. Nothing is drawn inside the game |
+| Network | Everything stays on `127.0.0.1`. No internet, no cloud AI |
 
-GSI is designed for spectators and peripherals, so it only shows what **you** can already see: your own health, money and weapons, the score, round phase and bomb state. There are no enemy positions and no hidden information.
-
-> Third-party anti-cheats (FACEIT, ESEA) have their own rules. They generally allow GSI and separate overlay windows, but check their current policy before using any tool there.
-
-## Project layout
-
-```
-cfg/gamestate_integration_cs2coach.cfg   GSI config (copy this into CS2)
-cs2coach/state.py        GSI JSON → typed GameSnapshot (+ console summary)
-cs2coach/coach.py        rule engine → one Advice (text + priority + colour level)
-cs2coach/gsi_server.py   stdlib HTTP server on 127.0.0.1:3000, token check
-cs2coach/overlay.py      tkinter always-on-top floating text window
-main.py                  wires everything together, CLI options
-tools/send_test_payload.py   fake CS2: replays a scripted round to test without the game
-tests/test_coach.py      unit tests (python -m unittest discover -s tests)
-```
+GSI only gives what you can already see (your HP, money, weapons, score, round phase, bomb state), so there is no hidden information.
 
 ## Setup
 
-### 1. Install the GSI config file
+### 1. Copy the config into CS2
 
-Copy `cfg/gamestate_integration_cs2coach.cfg` into CS2's **cfg** folder:
+Copy **`gamestate_integration_cs2coach.cfg`** to:
 
 ```
 C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive\game\csgo\cfg\
 ```
 
-To find the folder if CS2 is installed elsewhere: in Steam, right-click **Counter-Strike 2** → **Manage** → **Browse local files**, then open `game\csgo\cfg`.
+(Different Steam library? In Steam, right-click **Counter-Strike 2** → **Manage** → **Browse local files**, then open `game\csgo\cfg`.)
 
-> **You do not need `+exec` or any launch option.** CS2 automatically loads every file named `gamestate_integration_*.cfg` from that folder **when the game starts**. `exec gamestate_integration_cs2coach.cfg` would only run it as a list of console commands, which does nothing for GSI. If you add or edit the file while CS2 is running, **restart CS2**.
+CS2 loads `gamestate_integration_*.cfg` files **automatically at startup**, so there's no `+exec` or launch option to add. **Restart CS2** after copying or editing the file.
 
-### 2. Python
+### 2. Python packages
 
-Python 3.8+ is required. The Windows installer from python.org includes tkinter by default. On Linux you may need `sudo apt install python3-tk`.
+**No `pip install` needed.** The app uses only Python's standard library (`urllib` instead of `requests`, `tkinter` for the overlay). Python 3.8+ is required; the python.org Windows installer already includes `tkinter`.
 
-### 3. Run it
+### 3. Start LM Studio
 
-From this folder:
+1. In LM Studio, download and **load** a small *instruct* model that writes good Bulgarian. Good choices: **Gemma 3 4B/12B Instruct** or **Qwen2.5 7B Instruct**.
+   *Avoid "thinking" models (Qwen3, DeepSeek-R1…) or switch thinking off: they spend the 35-token limit on reasoning and return nothing.*
+2. Open the **Developer** tab and click **Start Server** (default port `1234`).
 
-```bash
-python main.py
-```
+The app picks whichever model is loaded. To choose one explicitly, use `--model <id>`.
 
-You can start CS2 before or after this. CS2 keeps retrying until the server answers. You'll see:
+> CS2 and the LLM share your GPU. If you lose FPS, use a smaller model (e.g. 4B) or offload some layers to the CPU in LM Studio.
 
-```
-CS2 Coach ready. Start CS2 (or run tools/send_test_payload.py). ...
-09:45:14  de_mirage R6 CT 3-2 T  phase=freezetime  [CT | you]  HP 100 AR 0  $5200  weapon=usp_silencer 12/12
-          >> COACH: Full buy: rifle + armor + nades + kit
-```
-
-…and a floating window with the current instruction in large text.
-
-### 4. Make the overlay visible in game
-
-Every always-on-top window, this one included, is hidden while CS2 runs in **exclusive Fullscreen**. Pick one:
-
-* **Second monitor (recommended):** place the overlay on your other screen, e.g. for a monitor to the right of a 1920-px main screen:
-  ```bash
-  python main.py --geometry 900x160+1920+40
-  ```
-  (`WIDTHxHEIGHT+X+Y`; use a negative X such as `+-1500+40` for a monitor on the left.) You can also just drag it there.
-* **Same monitor:** set CS2 to *Settings → Video → Display Mode → Fullscreen Windowed*. Then the overlay floats on top of the game.
-
-### Overlay controls
-
-| Action | Effect |
-|---|---|
-| Left-drag | Move the window |
-| Mouse wheel | Bigger / smaller text |
-| Double-click | Hide / show the small status line |
-| Right-click or Esc | Quit |
-
-### All options
-
-```
-python main.py --help
-  --port 3000              must match the "uri" in the .cfg
-  --token TOKEN            must match "auth" > "token" in the .cfg ('' disables the check)
-  --no-overlay             console output only
-  --geometry 900x160+X+Y   overlay size/position (or just +X+Y)
-  --alpha 0.85             overlay opacity
-  --font-size 34
-  --transparent            Windows only: see-through background, text only
-  --dump-payloads DIR      save every raw GSI payload (useful for writing new rules)
-  -v                       debug logging
-```
-
-## Test without CS2
-
-In one terminal:
+### 4. Run the coach
 
 ```bash
-python main.py
+python coach_app.py
 ```
 
-In a second terminal, replay a scripted round (buy → flashed → low ammo → low HP → bomb planted with no kit → death → round lost):
+Drag the window to your second monitor, or place it directly:
+
+```bash
+python coach_app.py --geometry +1920+40
+```
+
+(`+X+Y`: X=1920 is a monitor to the right of a 1920-px screen; use `+-1500+40` for one on the left.) Start order doesn't matter: CS2 retries, and the app reconnects to LM Studio by itself.
+
+## The overlay
+
+```
+┌───────────────────────────────────────────────────────┐
+│               Купи пълен сет, пази B                  │
+├───────────────────────────────────────────────────────┤
+│ ● CS2 GSI  ● LM Studio: gemma-3-4b  HP 100  $4750  AI │
+└───────────────────────────────────────────────────────┘
+```
+
+* **Text colour:** white = normal, amber = caution (eco, low HP), red = danger (no kit after plant, flashed, in fire).
+* **Status dots:** green = connected, amber = waiting / no model loaded / slow, red = offline.
+* **Last tag:** `AI` = command from the LLM; `rules` = instant built-in fallback (LM Studio offline, or the AI hasn't answered for this situation yet).
+* **Controls:** left-drag = move · mouse wheel = text size · double-click = hide status bar · right-click or Esc = quit.
+
+Exclusive **Fullscreen** CS2 hides every other window. Use a second monitor, or set CS2 to *Fullscreen Windowed*.
+
+## When the AI is asked
+
+CS2 sends updates up to twice a second. The app only queries the LLM on **meaningful** changes, so it doesn't overload your GPU:
+
+* round phase change (freezetime → live → over) or a new round, warmup/half-time/map changes
+* bomb planted / defused / exploded
+* a big HP drop (≥ 25 since the last analysis), dying, side switch
+* every 5 s while you're alive in a live round (`--interval`)
+
+Only the **newest** situation is ever queued. An AI answer that arrives after the situation changed (e.g. the round went live) is discarded, not shown.
+
+## Files
+
+```
+gamestate_integration_cs2coach.cfg   GSI config → copy into CS2 (step 1)
+coach_app.py                         run this: wires everything together
+cs2coach/gsi_server.py   ThreadingHTTPServer on 127.0.0.1:3000 (background thread)
+cs2coach/state.py        GSI JSON → GameSnapshot
+cs2coach/trigger.py      filtering & debouncing: when to ask the AI
+cs2coach/llm.py          LM Studio client, IGL system prompt, background LLM worker
+cs2coach/coach.py        instant Bulgarian rule-based fallback
+cs2coach/overlay.py      tkinter dark always-on-top window (theme.py = colours)
+tools/send_test_payload.py   fake CS2: replays a scripted round
+tests/fake_lmstudio.py       fake LM Studio for testing without a GPU
+```
+
+## Options
+
+```
+python coach_app.py --help
+  --port 3000            GSI port (must match the .cfg)
+  --token TOKEN          must match "auth" > "token" in the .cfg
+  --lmstudio-url URL     default http://127.0.0.1:1234
+  --model ID             LM Studio model id (default: the loaded one)
+  --temperature 0.3      --max-tokens 35      --llm-timeout 15
+  --interval 5           seconds between periodic analyses in a live round
+  --no-llm               rule-based coach only
+  --no-overlay           console only
+  --geometry +X+Y        overlay position (or WIDTHxHEIGHT+X+Y)
+  --font-size 34   --alpha 0.92   --transparent (Windows: see-through background)
+  --dump-payloads DIR    save raw GSI JSON (for tuning the prompt)
+  -v                     debug logging
+```
+
+The system prompt is `SYSTEM_PROMPT` in `cs2coach/llm.py`, and the game-state text sent with it is built by `build_state_report()` in the same file.
+
+## Test without CS2 or LM Studio
+
+Run each command in its own terminal, in this order:
+
+```bash
+python tests/fake_lmstudio.py
+```
+
+```bash
+python coach_app.py
+```
 
 ```bash
 python tools/send_test_payload.py
 ```
 
-Run the unit tests:
+Unit tests (31, covering parsing, triggers, LM Studio errors and timeouts, and stale answers):
 
 ```bash
 python -m unittest discover -s tests -v
 ```
 
-## Adding coaching rules
-
-Every rule in `cs2coach/coach.py` is a function that takes a `GameSnapshot` and returns `Advice(priority, text, level)` or `None`. The highest priority wins. To add one:
-
-```python
-def rule_save_rifle(s: GameSnapshot) -> Optional[Advice]:
-    if _alive_self_live(s) and s.bomb == "planted" and s.team == "CT" and not s.has_defuse_kit and s.health < 50:
-        return Advice(620, "Save your rifle: hide, don't retake", "warn")
-    return None
-
-RULES.append(rule_save_rifle)
-```
-
-### Limits of GSI data (what the coach can and can't know)
-
-While you are **playing**, GSI gives your own state, the score, round phase and bomb state. It does **not** give your position, teammates' states, enemy info or the round timer (the timer needs the `phase_countdowns` block, which you can add to the `.cfg`). So map-specific calls like *"rotate B"* can't be derived from GSI alone. They would need input from you or your team, or a more advanced engine plugged into `Coach.advise()` (for example an LLM that you feed the snapshot plus your team's comms).
-
 ## Troubleshooting
 
-* **Console shows nothing after CS2 starts:** confirm the `.cfg` is in `game\csgo\cfg` (not `csgo\cfg` at the top level), that the filename starts with `gamestate_integration_`, and that you restarted CS2. Open http://localhost:3000/ in a browser to confirm the server is up. If it still fails, change the cfg's `"uri"` to `"http://127.0.0.1:3000/"`.
-* **"Ignoring a payload with a missing or wrong auth token":** the token in the `.cfg` and `--token` don't match.
-* **"Could not open port 3000":** another copy (or another program) is using the port. Close it, or use `--port 3001` and change the `.cfg` to match.
-* **Overlay not visible over the game:** see step 4. Exclusive fullscreen hides it.
+* **`● CS2 GSI: waiting` forever:** the `.cfg` isn't in `game\csgo\cfg`, the filename doesn't start with `gamestate_integration_`, or CS2 wasn't restarted. Check http://127.0.0.1:3000/ in a browser to confirm the app is listening.
+* **`● LM Studio: offline`:** the LM Studio server isn't started (Developer tab → Start Server) or uses a different port (`--lmstudio-url`).
+* **`● LM Studio: no model loaded`:** load a model in LM Studio.
+* **`● LM Studio: timeout` / slow answers:** use a smaller model, or raise `--llm-timeout`. The first request after loading can be slow.
+* **AI answers in English or are too long:** use a stronger multilingual model (Gemma 3, Qwen2.5). Replies are trimmed to one line of at most 8 words.
+* **"Ignoring a payload with a missing or wrong auth token":** the `.cfg` token and `--token` differ.
+
+## Limits
+
+While you are alive, GSI doesn't include your position, teammates' or enemies' state, or the round timer. The AI only knows your own situation, economy, score and bomb state. Calls like "rotate B" are its tactical judgement from that data, not something it can see.

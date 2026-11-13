@@ -1,141 +1,168 @@
-"""Always-on-top floating overlay built on tkinter, which ships with Python.
+"""Always-on-top, dark, draggable second-screen window built on tkinter (stdlib).
 
 It is an ordinary, separate OS window: nothing is injected into or drawn
-inside CS2. That means it shows on top of CS2 only when the game runs in
-"Fullscreen Windowed" or "Windowed" mode. Exclusive fullscreen hides every
-other window, so in that case put the overlay on your second monitor.
+inside CS2. It shows on top of CS2 only in "Fullscreen Windowed"/"Windowed"
+mode. Exclusive fullscreen hides every other window, so put it on a second monitor.
 
-Controls:
-  * left-drag        move the window
-  * mouse wheel      make the text bigger or smaller
-  * double-click     hide or show the status line
-  * right-click      quit
+Layout:
+    ┌──────────────────────────────────────────────┐
+    │          Купи пълен сет, пази B               │  <- large centred command
+    ├──────────────────────────────────────────────┤
+    │ ● GSI   ● LM Studio: qwen2.5   HP 100  $4750 │  <- status bar
+    └──────────────────────────────────────────────┘
+
+Controls: left-drag = move, mouse wheel = text size, double-click = hide or
+show the status bar, right-click or Esc = quit.
 
 Thread safety: tkinter may only be touched from the thread that created it.
-Other threads (the GSI server) call ``Overlay.post(...)``, which only puts a
-message on a queue. The UI thread drains that queue every 100 ms.
+Other threads call ``Overlay.post(...)``, which only puts the text on a queue.
+The status bar is refreshed on the UI thread by calling ``status_fn``, which
+must itself be thread-safe and quick.
 """
 
 from __future__ import annotations
 
+import logging
 import queue
 import re
 import sys
-import time
 import tkinter as tk
 import tkinter.font as tkfont
-from typing import Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
-# Text colours for each Advice.level
-LEVEL_COLORS = {
-    "info": "#7CFC9A",    # green
-    "warn": "#FFC94D",    # amber
-    "danger": "#FF5C5C",  # red
-}
-BG_COLOR = "#101418"
-STATUS_COLOR = "#9AA4AE"
-STALE_AFTER_S = 15.0      # GSI heartbeat is 10 s, so no data for 15 s means "lost"
+from .theme import (
+    BAR_COLOR, BG_COLOR, DIVIDER_COLOR, GREEN, LEVEL_COLORS, MUTED, RED, StatusSegment,
+)
+
+log = logging.getLogger(__name__)
+
 DEFAULT_WIDTH = 900
+
+StatusFn = Callable[[], List[StatusSegment]]
 
 
 class Overlay:
     def __init__(
         self,
         geometry: Optional[str] = None,
-        alpha: float = 0.85,
+        alpha: float = 0.92,
         font_size: int = 34,
         transparent_bg: bool = False,
+        status_fn: Optional[StatusFn] = None,
+        status_interval_ms: int = 500,
     ) -> None:
-        self._queue: "queue.Queue[Tuple[str, str, str]]" = queue.Queue()
-        self._last_update = 0.0
+        self._queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()
+        self._status_fn = status_fn
+        self._status_interval_ms = status_interval_ms
         self._drag_offset = (0, 0)
+        self._status_labels: List[tk.Label] = []
 
         self.root = tk.Tk()
-        self.root.title("CS2 Coach")
-        self.root.overrideredirect(True)            # no title bar or borders
+        self.root.title("CS2 AI Coach")
+        self.root.overrideredirect(True)            # frameless: no title bar or borders
         self.root.attributes("-topmost", True)      # stay above other windows
         self.root.configure(bg=BG_COLOR)
         self._apply_transparency(alpha, transparent_bg)
 
-        self.big_font = tkfont.Font(family=self._pick_font(), size=font_size, weight="bold")
-        self.small_font = tkfont.Font(family=self._pick_font(), size=12)
+        family = self._pick_font()
+        self.big_font = tkfont.Font(family=family, size=font_size, weight="bold")
+        self.small_font = tkfont.Font(family=family, size=11)
 
         # The single large instruction field.
         self.instruction = tk.Label(
-            self.root,
-            text="Waiting for CS2...",
-            font=self.big_font,
-            fg=LEVEL_COLORS["info"],
-            bg=BG_COLOR,
-            padx=24,
-            pady=10,
-            justify="center",
+            self.root, text="Чакам CS2...", font=self.big_font,
+            fg=LEVEL_COLORS["info"], bg=BG_COLOR, padx=24, pady=14, justify="center",
         )
         self.instruction.pack(fill="both", expand=True)
 
-        # A small status line under it (map, HP, money...).
-        self.status = tk.Label(
-            self.root, text="", font=self.small_font, fg=STATUS_COLOR, bg=BG_COLOR, pady=4
-        )
-        self.status.pack(fill="x")
+        # Status bar: a 1-px divider, then a row of coloured segments.
+        self.divider = tk.Frame(self.root, height=1, bg=DIVIDER_COLOR)
+        self.divider.pack(fill="x")
+        self.status_bar = tk.Frame(self.root, bg=BAR_COLOR, padx=10, pady=5)
+        self.status_bar.pack(fill="x")
 
         self._place_window(geometry)
-        self._bind_controls()
+        self._bind_controls(self.root, self.instruction, self.status_bar)
 
-    # ---- public API (safe to call from any thread) -------------------------
+    # ---- public API (post() is safe to call from any thread) ---------------
 
-    def post(self, text: str, level: str = "info", status: str = "") -> None:
+    def post(self, text: str, level: str = "info") -> None:
         """Queue a new instruction for display."""
-        self._queue.put((text, level, status))
+        self._queue.put((text, level))
 
     def run(self) -> None:
         """Start the Tk event loop. Blocks until the window is closed."""
-        self.root.after(100, self._poll_queue)
+        self.root.after(50, self._poll_queue)
+        self.root.after(50, self._refresh_status)
         self.root.after(2000, self._keep_on_top)
         self.root.mainloop()
 
-    # ---- internals ---------------------------------------------------------
+    def close(self) -> None:
+        """Close the window. Call from the UI thread (e.g. via root.after)."""
+        self.root.destroy()
+
+    # ---- periodic UI-thread tasks -------------------------------------------
 
     def _poll_queue(self) -> None:
         latest = None
         try:
-            while True:  # take everything queued and show only the newest message
+            while True:  # drain the queue and show only the newest message
                 latest = self._queue.get_nowait()
         except queue.Empty:
             pass
-
         if latest is not None:
-            text, level, status = latest
+            text, level = latest
             self.instruction.config(text=text, fg=LEVEL_COLORS.get(level, LEVEL_COLORS["info"]))
-            self.status.config(text=status)
-            self._last_update = time.monotonic()
-        elif self._last_update and time.monotonic() - self._last_update > STALE_AFTER_S:
-            self.status.config(text="No data from CS2. Is the game running with the .cfg installed?")
-
         self.root.after(100, self._poll_queue)
 
+    def _refresh_status(self) -> None:
+        if self._status_fn is not None:
+            try:
+                segments = self._status_fn()
+            except Exception:
+                log.exception("status_fn failed")
+                segments = [("status error", RED)]
+            self._render_status(segments)
+        self.root.after(self._status_interval_ms, self._refresh_status)
+
+    def _render_status(self, segments: List[StatusSegment]) -> None:
+        # Reuse labels; create more or remove extras only when the count changes.
+        while len(self._status_labels) < len(segments):
+            label = tk.Label(self.status_bar, font=self.small_font, bg=BAR_COLOR, padx=6)
+            label.pack(side="left")
+            self._bind_controls(label)
+            self._status_labels.append(label)
+        while len(self._status_labels) > len(segments):
+            self._status_labels.pop().destroy()
+        for label, (text, color) in zip(self._status_labels, segments):
+            if label.cget("text") != text or label.cget("fg") != color:
+                label.config(text=text, fg=color)
+
     def _keep_on_top(self) -> None:
-        # Some window managers drop "topmost" when another app goes fullscreen. Re-assert it.
+        # Some window managers drop "topmost" when another app goes fullscreen.
         self.root.attributes("-topmost", True)
         self.root.lift()
         self.root.after(2000, self._keep_on_top)
 
+    # ---- setup helpers ------------------------------------------------------
+
     def _apply_transparency(self, alpha: float, transparent_bg: bool) -> None:
         if transparent_bg and sys.platform == "win32":
-            # Windows only: make the background colour fully see-through, so only text shows.
+            # Windows only: the background colour becomes fully see-through.
             self.root.attributes("-transparentcolor", BG_COLOR)
             return
         try:
             self.root.attributes("-alpha", max(0.2, min(alpha, 1.0)))
         except tk.TclError:
-            pass  # some Linux window managers don't support alpha; that's fine
+            pass  # some Linux window managers don't support alpha
 
     def _place_window(self, geometry: Optional[str]) -> None:
-        """Position the window. The width is fixed and the height grows with the text.
+        """Fixed width; the height grows with the text.
 
         ``geometry`` is a Tk geometry string: "900x160+1920+40" (size and position)
-        or "+1920+40" (position only). Position x=1920 puts the window on a monitor
-        to the right of a 1920-px-wide main screen.
+        or "+1920+40" (position only). x=1920 puts the window on a monitor to
+        the right of a 1920-px-wide main screen; a negative x such as "+-1500+40"
+        puts it on a monitor to the left.
         """
         width, min_height, pos = DEFAULT_WIDTH, 1, None
         if geometry:
@@ -148,22 +175,21 @@ class Overlay:
         if pos is None:
             pos = f"+{(self.root.winfo_screenwidth() - width) // 2}+40"  # top-centre
 
-        # Long instructions wrap onto extra lines instead of being cut off.
-        self.instruction.config(wraplength=width - 48)
+        self.instruction.config(wraplength=width - 48)  # wrap instead of cutting off
         self.root.minsize(width, min_height)
         self.root.maxsize(width, 10_000)
         self.root.geometry(pos)
 
-    def _bind_controls(self) -> None:
-        for widget in (self.root, self.instruction, self.status):
+    def _bind_controls(self, *widgets: tk.Misc) -> None:
+        for widget in widgets:
             widget.bind("<ButtonPress-1>", self._start_drag)
             widget.bind("<B1-Motion>", self._drag)
-            widget.bind("<Button-3>", lambda e: self.root.destroy())
+            widget.bind("<Button-3>", lambda e: self.close())
             widget.bind("<Double-Button-1>", self._toggle_status)
             widget.bind("<MouseWheel>", self._wheel)                        # Windows / macOS
             widget.bind("<Button-4>", lambda e: self._resize_font(+2))      # Linux scroll up
             widget.bind("<Button-5>", lambda e: self._resize_font(-2))      # Linux scroll down
-        self.root.bind("<Escape>", lambda e: self.root.destroy())
+        self.root.bind("<Escape>", lambda e: self.close())
 
     def _start_drag(self, event: tk.Event) -> None:
         self._drag_offset = (event.x_root - self.root.winfo_x(), event.y_root - self.root.winfo_y())
@@ -179,12 +205,15 @@ class Overlay:
         self.big_font.configure(size=max(12, min(96, self.big_font.cget("size") + step)))
 
     def _toggle_status(self, _event: tk.Event) -> None:
-        if self.status.winfo_ismapped():
-            self.status.pack_forget()
+        if self.status_bar.winfo_ismapped():
+            self.divider.pack_forget()
+            self.status_bar.pack_forget()
         else:
-            self.status.pack(fill="x")
+            self.divider.pack(fill="x")
+            self.status_bar.pack(fill="x")
 
     def _pick_font(self) -> str:
+        # All of these include Cyrillic glyphs.
         available = set(tkfont.families(self.root))
         for name in ("Segoe UI", "Helvetica Neue", "DejaVu Sans", "Arial"):
             if name in available:
@@ -194,6 +223,9 @@ class Overlay:
 
 if __name__ == "__main__":
     # Quick visual check without CS2: python -m cs2coach.overlay
-    demo = Overlay()
-    demo.post("Do: Save weapons & rotate B", "warn", "de_mirage R14  CT 7-6 T  HP 64  $1850")
+    demo = Overlay(status_fn=lambda: [
+        ("● CS2 GSI", GREEN), ("● LM Studio: demo-model", GREEN),
+        ("HP 64   $1850", MUTED), ("AI", MUTED),
+    ])
+    demo.post("Спаси оръжието, ротирай B", "warn")
     demo.run()

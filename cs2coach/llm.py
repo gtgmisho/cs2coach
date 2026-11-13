@@ -188,10 +188,13 @@ class LMStudioClient:
                 e.close()
             raise LLMError(f"HTTP {e.code} from LM Studio: {detail[:200]}", "http") from None
         except urllib.error.URLError as e:
-            if isinstance(e.reason, TimeoutError):
-                raise LLMError("LM Studio timed out", "timeout") from None
+            # urllib wraps only CONNECT/SEND failures in URLError, so even a
+            # timeout here means we never reached LM Studio. On Windows, a
+            # refused localhost connection takes ~2 s and often surfaces as a
+            # connect timeout rather than "connection refused".
             raise LLMError(f"LM Studio not reachable ({e.reason})", "offline") from None
         except TimeoutError:
+            # Connected, but no reply in time: the model is slow or still loading.
             raise LLMError("LM Studio timed out", "timeout") from None
         except OSError as e:  # connection reset mid-response, etc.
             raise LLMError(f"LM Studio connection error ({e})", "offline") from None

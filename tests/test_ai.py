@@ -11,6 +11,8 @@ import sys
 import threading
 import time
 import unittest
+import urllib.error
+from unittest import mock
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(HERE, ".."))
@@ -33,7 +35,7 @@ def free_port() -> int:
         return s.getsockname()[1]
 
 
-def wait_for(predicate, timeout=3.0):
+def wait_for(predicate, timeout=8.0):  # generous: Windows refuses connections slowly
     end = time.monotonic() + timeout
     while time.monotonic() < end:
         if predicate():
@@ -119,6 +121,22 @@ class ClientTests(unittest.TestCase):
         with self.assertRaises(LLMError) as ctx:
             LMStudioClient(self.fake.url).get_command("r", "test-model")
         self.assertEqual(ctx.exception.kind, "bad_reply")
+
+    def test_connect_timeout_counts_as_offline(self):
+        # Windows: a closed localhost port often times out on CONNECT (~2 s)
+        # instead of refusing. That means "not running", not "slow model".
+        c = LMStudioClient(self.fake.url)
+        with mock.patch.object(c._opener, "open", side_effect=urllib.error.URLError(TimeoutError("timed out"))):
+            with self.assertRaises(LLMError) as ctx:
+                c.detect_model()
+        self.assertEqual(ctx.exception.kind, "offline")
+
+    def test_read_timeout_counts_as_timeout(self):
+        c = LMStudioClient(self.fake.url)
+        with mock.patch.object(c._opener, "open", side_effect=TimeoutError("timed out")):
+            with self.assertRaises(LLMError) as ctx:
+                c.get_command("r", "test-model")
+        self.assertEqual(ctx.exception.kind, "timeout")
 
     def test_offline(self):
         with self.assertRaises(LLMError) as ctx:

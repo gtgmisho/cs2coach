@@ -40,13 +40,34 @@ CS2 loads `gamestate_integration_*.cfg` files **automatically at startup**, so t
 
 ### 3. Start LM Studio
 
-1. In LM Studio, download and **load** a small *instruct* model. Good choices: **Llama 3.1 8B Instruct**, **Qwen2.5 7B Instruct** or **Gemma 3 4B Instruct**.
-   *Avoid "thinking" models (Qwen3, DeepSeek-R1…) or switch thinking off: they spend the 35-token limit on reasoning and return nothing.*
+1. In LM Studio, download and **load** a small, **non-thinking instruct** model (see below). The `Q4_K_M` download is a good size/quality balance.
 2. Open the **Developer** tab and click **Start Server** (default port `1234`).
 
 The app picks whichever model is loaded. To choose one explicitly, use `--model <id>`.
 
-> CS2 and the LLM share your GPU. If you lose FPS, use a smaller model (e.g. 4B) or offload some layers to the CPU in LM Studio.
+#### Which model?
+
+CS2 and the model share your graphics card, so smaller is better. You only need one short sentence back, quickly.
+
+| Your GPU memory (VRAM) | Recommended model | Approx. VRAM used (Q4_K_M) |
+|---|---|---|
+| 6–8 GB | **Qwen3 4B Instruct 2507** or **Gemma 3 4B Instruct** | ~3 GB |
+| 10–12 GB | **Llama 3.1 8B Instruct** or **Qwen2.5 7B Instruct** | ~5 GB |
+| 16 GB+ | **Gemma 3 12B Instruct** | ~8 GB |
+
+If you lose FPS, go one size down, or lower the "GPU offload" slider in LM Studio's model settings so part of the model runs on the CPU.
+
+#### Thinking (reasoning) models
+
+The coach asks for at most **35 tokens** so answers stay fast. A *thinking* model spends those tokens on hidden reasoning and never reaches the answer. The coach handles this automatically:
+
+| Model type | Examples | What the coach does |
+|---|---|---|
+| Instruct (no thinking) | Qwen3 Instruct 2507, Gemma 3, Llama 3.1, Qwen2.5 | Works directly. **Best choice** |
+| Hybrid (thinking can be switched off) | original Qwen3 4B / 8B / 14B | Detects the thinking, adds `/no_think` to the prompt, remembers it. Works, but the first answer is a bit slower |
+| Always thinking | DeepSeek-R1 and its distills, QwQ, gpt-oss, Qwen3 "Thinking 2507", Phi-4-reasoning, Magistral | Can't answer in 35 tokens. The overlay shows **`● LM Studio: thinking model, use instruct`**; load an instruct model instead |
+
+Model names with *R1*, *Thinking*, *Reasoning* or *QwQ* are thinking models. If your model has a thinking/reasoning on-off setting in LM Studio, turning it off works too.
 
 ### 4. Run the coach
 
@@ -152,6 +173,7 @@ python -m unittest discover -s tests -v
 * **`● CS2 GSI: waiting` forever:** the `.cfg` isn't in `game\csgo\cfg`, the filename doesn't start with `gamestate_integration_`, or CS2 wasn't restarted. Check http://127.0.0.1:3000/ in a browser to confirm the app is listening.
 * **`● LM Studio: offline`:** the LM Studio server isn't started (Developer tab → Start Server) or uses a different port (`--lmstudio-url`).
 * **`● LM Studio: no model loaded`:** load a model in LM Studio.
+* **`● LM Studio: thinking model, use instruct`:** the loaded model always reasons before answering. Load a non-thinking instruct model (see *Which model?*). The coach retries every 15 s, so it recovers on its own once you switch.
 * **`● LM Studio: timeout` / slow answers:** use a smaller model, or raise `--llm-timeout`. The first request after loading can be slow.
 * **AI answers are vague or too long:** try a stronger instruct model (Llama 3.1 8B, Qwen2.5 7B). Replies are trimmed to one line of at most 8 words.
 * **"Ignoring a payload with a missing or wrong auth token":** the `.cfg` token and `--token` differ.

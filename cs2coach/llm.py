@@ -21,7 +21,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, replace
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from .state import GameSnapshot
 
@@ -123,6 +123,11 @@ def clean_command(text: str, max_words: int = 8) -> str:
     text = _THINK_BLOCK.sub("", text or "")
     if re.search(r"<think>", text, re.I):
         return ""  # the reply was cut off while the model was still "thinking"
+    if "<|channel|>" in text:  # raw gpt-oss format: keep only the final answer, if any
+        final = text.split("<|channel|>final<|message|>", 1)
+        if len(final) < 2:
+            return ""
+        text = final[1].split("<|", 1)[0]
     for line in text.splitlines():
         line = _LEADING_JUNK.sub("", line.strip().strip(_QUOTES)).strip(_QUOTES)
         if line:
@@ -167,6 +172,8 @@ class LMStudioClient:
         self.probe_timeout = probe_timeout
         # Never route localhost traffic through a system/corporate proxy.
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        # Models found to need "/no_think" (only touched by the worker thread).
+        self._no_think_models: Set[str] = set()
 
     # ---- HTTP --------------------------------------------------------------
 
@@ -240,12 +247,40 @@ class LMStudioClient:
         return ids[0]
 
     def get_command(self, report: str, model: str) -> str:
-        """Ask the model for one short English command. Raises LLMError."""
+        """Ask the model for one short English command. Raises LLMError.
+
+        "Thinking" (reasoning) models spend the small token budget on hidden
+        reasoning and never reach the answer. Hybrid models such as Qwen3 skip
+        their reasoning when the prompt contains ``/no_think``, so on the first
+        thinking reply we retry once with it and remember that for this model.
+        Models that always think raise LLMError(kind="thinking").
+        """
+        no_think = model in self._no_think_models
+        command, thinking = self._chat(report, model, no_think)
+        if command:
+            return command
+        if thinking and not no_think:
+            command, thinking = self._chat(report, model, no_think=True)
+            if command:
+                self._no_think_models.add(model)
+                log.info("Model '%s' thinks by default; sending /no_think from now on", model)
+                return command
+        if thinking:
+            raise LLMError(
+                f"'{model}' is a thinking (reasoning) model and used the whole "
+                f"{self.max_tokens}-token budget on reasoning. Load a non-thinking "
+                "instruct model in LM Studio (see README).",
+                "thinking",
+            )
+        raise LLMError("empty reply from the model", "bad_reply")
+
+    def _chat(self, report: str, model: str, no_think: bool) -> Tuple[str, bool]:
+        """One chat request. Returns (cleaned command or "", reply looked like thinking)."""
         body = {
             "model": model,
             "messages": [
                 {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": report},
+                {"role": "user", "content": report + ("\n\n/no_think" if no_think else "")},
             ],
             "temperature": self.temperature,
             "max_tokens": self.max_tokens,
@@ -253,16 +288,19 @@ class LMStudioClient:
         }
         data = self._request("POST", "/v1/chat/completions", body, timeout=self.timeout)
         try:
-            content = data["choices"][0]["message"].get("content") or ""
+            message = data["choices"][0]["message"]
+            content = message.get("content") or ""
         except (KeyError, IndexError, TypeError, AttributeError):
             raise LLMError("unexpected reply format from LM Studio", "bad_reply") from None
         command = clean_command(content)
-        if not command:
-            raise LLMError(
-                "empty reply (a 'thinking' model? use an instruct model or raise --max-tokens)",
-                "bad_reply",
-            )
-        return command
+        # LM Studio either puts the reasoning in a separate field, or leaves an
+        # unfinished <think> / gpt-oss "<|channel|>" block in the content.
+        thinking = bool(
+            message.get("reasoning_content")
+            or message.get("reasoning")
+            or re.search(r"<think>|<\|channel\|>", content, re.I)
+        )
+        return command, thinking
 
 
 # --- Background worker --------------------------------------------------------
@@ -270,7 +308,7 @@ class LMStudioClient:
 
 @dataclass(frozen=True)
 class LLMStatus:
-    state: str = "unknown"   # unknown | online | offline | timeout | no_model | http | bad_reply
+    state: str = "unknown"   # unknown | online | offline | timeout | no_model | thinking | http | bad_reply
     model: str = ""
     detail: str = ""
     busy: bool = False       # a request is in flight right now
@@ -303,12 +341,15 @@ class LLMWorker(threading.Thread):
         on_result: ResultCallback,
         health_interval: float = 5.0,
         offline_retry: float = 2.0,
+        thinking_retry: float = 15.0,
     ) -> None:
         super().__init__(name="llm-worker", daemon=True)
         self.client = client
         self.on_result = on_result
         self.health_interval = health_interval
         self.offline_retry = offline_retry
+        self.thinking_retry = thinking_retry
+        self._last_attempt = -1e9
         self._cond = threading.Condition()
         self._pending: Optional[AnalysisJob] = None
         self._stopping = False
@@ -351,32 +392,41 @@ class LLMWorker(threading.Thread):
 
     def _step(self, job: Optional[AnalysisJob]) -> None:
         now = time.monotonic()
-        usable = self.status.usable
+        status = self.status
         if job is None:
             if now - self._last_probe >= self.health_interval:
                 self._probe()
             return
-        if not usable:
+        if status.state == "thinking":
+            # LM Studio is up but the model can't answer in time. Retry only
+            # now and then (the user may switch model or turn thinking off).
+            if now - self._last_attempt < self.thinking_retry:
+                return
+        elif not status.usable:
             if now - self._last_probe < self.offline_retry:
                 return  # LM Studio was just found down. Drop the job; the rules cover it
-            self._probe()
-            if not self.status.usable:
+            if not self._probe():
                 return
         self._analyze(job)
 
-    def _probe(self) -> None:
+    def _probe(self) -> bool:
+        """Health check. Returns True if LM Studio answered with a model."""
         self._last_probe = time.monotonic()
         try:
             model = self.client.detect_model()
         except LLMError as e:
             self._set_status(state=e.kind, detail=str(e), busy=False)
-        else:
-            self._set_status(state="online", model=model, detail="", busy=False)
+            return False
+        st = self.status
+        if st.state == "thinking" and st.model == model:
+            return True  # same thinking model: keep saying so instead of flashing "online"
+        self._set_status(state="online", model=model, detail="", busy=False)
+        return True
 
     def _analyze(self, job: AnalysisJob) -> None:
         model = self.status.model
         self._set_status(busy=True)
-        started = time.monotonic()
+        started = self._last_attempt = time.monotonic()
         try:
             command = self.client.get_command(job.report, model)
         except LLMError as e:

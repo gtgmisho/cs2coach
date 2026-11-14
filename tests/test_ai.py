@@ -53,6 +53,8 @@ class CleanCommandTests(unittest.TestCase):
             "- **Save your rifle**": "Save your rifle",
             "<think>hmm</think>\nDefuse now": "Defuse now",
             "<think>still thinking and cut off": "",
+            "<|channel|>analysis<|message|>The player is CT": "",
+            "<|channel|>analysis<|message|>x<|end|><|start|>assistant<|channel|>final<|message|>Hold B<|return|>": "Hold B",
             "": "",
             "one two three four five six seven eight nine ten": "one two three four five six seven eight",
         }
@@ -116,11 +118,29 @@ class ClientTests(unittest.TestCase):
             LMStudioClient(self.fake.url, timeout=0.2).get_command("r", "test-model")
         self.assertEqual(ctx.exception.kind, "timeout")
 
-    def test_thinking_model_cut_off(self):
-        self.fake.reply = "<think>Let me analyse the economy of"
-        with self.assertRaises(LLMError) as ctx:
-            LMStudioClient(self.fake.url).get_command("r", "test-model")
-        self.assertEqual(ctx.exception.kind, "bad_reply")
+    def test_hybrid_thinking_model_gets_no_think(self):
+        # Qwen3-style: thinks by default, answers directly with /no_think.
+        self.fake.thinking = "hybrid"
+        c = LMStudioClient(self.fake.url)
+        with self.assertLogs("cs2coach.llm", level="INFO"):
+            self.assertEqual(c.get_command("r", "test-model"), "Buy full set, hold B")
+        self.assertEqual(len(self.fake.requests), 2)            # 1 failed + 1 retry
+        self.assertEqual(c.get_command("r", "test-model"), "Buy full set, hold B")
+        self.assertEqual(len(self.fake.requests), 3)            # remembered: no retry
+        self.assertTrue(self.fake.requests[-1]["messages"][-1]["content"].endswith("/no_think"))
+
+    def test_always_thinking_model(self):
+        for separate in (False, True):
+            with self.subTest(separate_reasoning=separate):
+                self.fake.thinking, self.fake.separate_reasoning = "always", separate
+                with self.assertRaises(LLMError) as ctx:
+                    LMStudioClient(self.fake.url).get_command("r", "test-model")
+                self.assertEqual(ctx.exception.kind, "thinking")
+                self.assertIn("non-thinking instruct model", str(ctx.exception))
+
+    def test_instruct_model_sends_no_extra_prompt(self):
+        LMStudioClient(self.fake.url).get_command("r", "test-model")
+        self.assertEqual(self.fake.requests[-1]["messages"][-1]["content"], "r")
 
     def test_connect_timeout_counts_as_offline(self):
         # Windows: a closed localhost port often times out on CONNECT (~2 s)
@@ -167,6 +187,38 @@ class WorkerTests(unittest.TestCase):
         w.stop()
         w.join(2)
         self.assertFalse(w.is_alive())
+
+
+class ThinkingWorkerTests(unittest.TestCase):
+    def test_thinking_model_status_and_recovery(self):
+        fake = FakeLMStudio(thinking="always").start()
+        results = []
+        w = LLMWorker(LMStudioClient(fake.url), lambda j, c, t: results.append(c),
+                      health_interval=0.1, thinking_retry=1.0)
+        try:
+            with self.assertLogs("cs2coach.llm", level="INFO") as logs:
+                w.start()
+                self.assertTrue(wait_for(lambda: w.status.usable))
+                w.submit(AnalysisJob("report", ("k",), "test"))
+                self.assertTrue(wait_for(lambda: w.status.state == "thinking"))
+                # Health checks keep running but must not flip the status back to "online".
+                time.sleep(0.4)
+                self.assertEqual(w.status.state, "thinking")
+                # Jobs right after a failed attempt are skipped (no request spam).
+                n = len(fake.requests)
+                w.submit(AnalysisJob("report", ("k",), "test"))
+                time.sleep(0.1)
+                self.assertEqual(len(fake.requests), n)
+                # The user loads an instruct model: the next retry succeeds.
+                fake.thinking = "off"
+                time.sleep(0.7)                 # past thinking_retry since the last attempt
+                w.submit(AnalysisJob("report", ("k",), "test"))
+                self.assertTrue(wait_for(lambda: results == ["Buy full set, hold B"]))
+                self.assertTrue(w.status.usable)
+            self.assertTrue(any("thinking" in line for line in logs.output))
+        finally:
+            w.stop()
+            fake.stop()
 
 
 class AppTests(unittest.TestCase):

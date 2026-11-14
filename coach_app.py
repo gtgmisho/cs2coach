@@ -176,6 +176,7 @@ class CoachApp:
             "offline": ("● LM Studio: offline", RED),
             "no_model": ("● LM Studio: no model loaded", AMBER),
             "timeout": ("● LM Studio: timeout", AMBER),
+            "thinking": ("● LM Studio: thinking model, use instruct", AMBER),
         }
         return labels.get(st.state, ("● LM Studio: error", RED))
 

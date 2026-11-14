@@ -21,12 +21,20 @@ class FakeLMStudio:
         native_api: bool = True,
         loaded: bool = True,
         port: int = 0,
+        thinking: str = "off",
+        separate_reasoning: bool = False,
     ) -> None:
+        """thinking: "off" (instruct model), "hybrid" (thinks unless the prompt
+        has /no_think, like Qwen3) or "always" (like DeepSeek-R1 / gpt-oss).
+        separate_reasoning: put reasoning in `reasoning_content` the way LM
+        Studio does when that setting is on, instead of a <think> block."""
         self.reply = reply
         self.delay = delay
         self.status = status
         self.native_api = native_api
         self.loaded = loaded
+        self.thinking = thinking
+        self.separate_reasoning = separate_reasoning
         self.requests: List[Dict[str, Any]] = []
         fake = self
 
@@ -66,10 +74,22 @@ class FakeLMStudio:
                     time.sleep(fake.delay)
                 if fake.status != 200:
                     return self._send(fake.status, {"error": "No models loaded"})
-                self._send(200, {"choices": [{"message": {"role": "assistant", "content": fake.reply}}]})
+                self._send(200, {"choices": [{"message": fake.message(body)}]})
 
         self.server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
         self.server.daemon_threads = True
+
+    def message(self, body: Dict[str, Any]) -> Dict[str, Any]:
+        """The assistant message a model of the configured kind would return."""
+        user = body["messages"][-1]["content"]
+        thinks = self.thinking == "always" or (self.thinking == "hybrid" and "/no_think" not in user)
+        if not thinks:
+            prefix = "<think>\n\n</think>\n\n" if self.thinking == "hybrid" else ""
+            return {"role": "assistant", "content": prefix + self.reply}
+        reasoning = "Okay, the player is CT with low money, so the team should probably"  # cut off
+        if self.separate_reasoning:
+            return {"role": "assistant", "content": "", "reasoning_content": reasoning}
+        return {"role": "assistant", "content": "<think>\n" + reasoning}
 
     @property
     def url(self) -> str:
@@ -91,8 +111,9 @@ if __name__ == "__main__":
     ap.add_argument("--port", type=int, default=1234)
     ap.add_argument("--reply", default="Buy full set, hold B")
     ap.add_argument("--delay", type=float, default=0.5)
+    ap.add_argument("--thinking", choices=("off", "hybrid", "always"), default="off")
     a = ap.parse_args()
-    fake = FakeLMStudio(reply=a.reply, delay=a.delay, port=a.port).start()
+    fake = FakeLMStudio(reply=a.reply, delay=a.delay, port=a.port, thinking=a.thinking).start()
     print(f"Fake LM Studio on {fake.url} (Ctrl+C to stop)")
     try:
         while True:

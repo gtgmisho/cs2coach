@@ -7,6 +7,7 @@ import copy
 import json
 import os
 import sys
+import time
 import unittest
 import urllib.error
 import urllib.request
@@ -143,6 +144,11 @@ class ServerTests(unittest.TestCase):
 
     def test_accepts_valid_payload(self):
         self.assertEqual(self._post(BASE), 200)
+        # The server answers CS2 *before* handing the payload on (so CS2 never
+        # waits on us), so allow a moment for the hand-off to happen.
+        deadline = time.monotonic() + 5
+        while not self.received and time.monotonic() < deadline:
+            time.sleep(0.01)
         self.assertEqual(len(self.received), 1)
 
     def test_rejects_wrong_token(self):

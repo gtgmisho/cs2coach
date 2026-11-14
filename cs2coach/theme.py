@@ -13,6 +13,7 @@ MUTED = "#8B949E"
 GREEN = "#3FB950"
 AMBER = "#D29922"
 RED = "#F85149"
+TIP_COLOR = "#79C0FF"   # light blue: the optional AI tip line
 
 # Large command text colour per Advice.level (high contrast on BG_COLOR)
 LEVEL_COLORS = {

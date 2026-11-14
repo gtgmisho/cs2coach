@@ -1,12 +1,14 @@
 # CS2 AI Coach
 
-A read-only, real-time CS2 coach that runs **entirely on your PC**. CS2 streams its game state to the app, a **local LLM in LM Studio** turns it into a short IGL command, and a floating window on your second monitor shows it.
+A read-only, real-time CS2 coach that runs **entirely on your PC**. CS2 streams its game state to the app, a **rules engine** turns it into one clear call, an optional **local LLM in LM Studio** adds a short extra tip, and a floating window on your second monitor shows both.
 
 ```
-CS2 ──GSI (HTTP POST)──▶ coach_app.py :3000 ──▶ LM Studio :1234 (local LLM)
-                              │                        │
-                              └──── overlay window ◀───┘   "Buy full set, hold B"
+CS2 ──GSI (HTTP POST)──▶ coach_app.py :3000 ──▶ rules engine ──▶ MAIN CALL   "Buy full set and kit"
+                                      │
+                                      └──▶ LM Studio :1234 ──▶ checks ──▶ AI tip   "Throw utility before you peek"
 ```
+
+**Why the rules make the main call:** CS2 doesn't tell the coach where anyone is, and small local models confidently invent things they can't know ("rotate B"). The rules only use real facts and answer instantly, so they're the call you can trust. The AI can only add a tip underneath, and only if it passes the checks in [What the AI may say](#what-the-ai-may-say).
 
 ## Safe for VAC / FACEIT
 
@@ -87,29 +89,41 @@ python coach_app.py --geometry +1920+40
 
 ```
 ┌───────────────────────────────────────────────────────┐
-│                 Buy full set, hold B                  │
+│                 Buy full set and kit                  │
+│            AI: Throw utility before you peek          │
 ├───────────────────────────────────────────────────────┤
-│ ● CS2 GSI  ● LM Studio: gemma-3-4b  HP 100  $4750  AI │
+│ ● CS2 GSI   ● LM Studio: gemma-3-4b   HP 100   $5200  │
 └───────────────────────────────────────────────────────┘
 ```
 
-* **Text colour:** white = normal, amber = caution (eco, low HP), red = danger (no kit after plant, flashed, in fire).
+* **Big line, the main call:** always from the rules. White = normal, amber = caution (eco, save, low HP), red = danger (no kit after plant, blind, in fire).
+* **Blue italic line, the AI tip:** optional. It appears only for the exact call above it and disappears as soon as the call changes.
 * **Status dots:** green = connected, amber = waiting / no model loaded / slow, red = offline.
-* **Last tag:** `AI` = command from the LLM; `rules` = instant built-in fallback (LM Studio offline, or the AI hasn't answered for this situation yet).
 * **Controls:** left-drag = move · mouse wheel = text size · double-click = hide status bar · right-click or Esc = quit.
 
 Exclusive **Fullscreen** CS2 hides every other window. Use a second monitor, or set CS2 to *Fullscreen Windowed*.
 
-## When the AI is asked
+## What the main call covers
 
-CS2 sends updates up to twice a second. The app only queries the LLM on **meaningful** changes, so it doesn't overload your GPU:
+| Moment | Calls |
+|---|---|
+| Buy time | pistol buys · **won/lost pistol** follow-up · full buy (+ kit on CT) · eco · **save now if the loss bonus gets you a full buy next round** · force on the last round of the half and at **enemy match point** · then step by step as you buy: armor → kit → utility → **drop a rifle for a teammate** → ready |
+| Live round | out of the fire · blind · bomb carrier · low ammo · low HP · post-plant (T) · defuse with kit / no-kit retake · **save your rifle** (CT, no kit, low HP, expensive loadout) · dead: give info |
+| Round end | won / lost |
 
-* round phase change (freezetime → live → over) or a new round, warmup/half-time/map changes
-* bomb planted / defused / exploded
-* a big HP drop (≥ 25 since the last analysis), dying, side switch
-* every 5 s while you're alive in a live round (`--interval`)
+## What the AI may say
 
-Only the **newest** situation is ever queued. An AI answer that arrives after the situation changed (e.g. the round went live) is discarded, not shown.
+The AI gets your facts plus the main call, and is told what it cannot know. Before a tip is shown, the coach checks it and **rejects** any tip that:
+
+* mentions a map area, site, callout or rotation (CS2 doesn't send positions)
+* repeats or contradicts the main call (e.g. "buy" when the call is "save money", or "peek" when the call is "save your rifle")
+* gives buy advice during a live round
+* tells you to defuse without a planted bomb, gives retake advice on T side, or tells you to plant when that doesn't fit
+* tells a dead player to peek, push or hold
+
+Rejected tips are printed in the console (`AI tip rejected (reason): ...`) so you can see what the model tried. There's no AI tip for blind/fire moments (they pass too fast) or during warmup.
+
+The AI is asked on meaningful changes only: new round phase, bomb change, a big HP drop, death, a new main call, or every 8 s alive in a live round (`--interval`). An answer that arrives after the situation changed is discarded.
 
 ## Files
 
@@ -118,9 +132,10 @@ gamestate_integration_cs2coach.cfg   GSI config → copy into CS2 (step 1)
 coach_app.py                         run this: wires everything together
 cs2coach/gsi_server.py   ThreadingHTTPServer on 127.0.0.1:3000 (background thread)
 cs2coach/state.py        GSI JSON → GameSnapshot
+cs2coach/coach.py        rules engine: the MAIN CALL (economy, bomb, survival)
 cs2coach/trigger.py      filtering & debouncing: when to ask the AI
-cs2coach/llm.py          LM Studio client, IGL system prompt, background LLM worker
-cs2coach/coach.py        instant rule-based fallback
+cs2coach/llm.py          LM Studio client, AI-tip prompt, background LLM worker
+cs2coach/validate.py     checks every AI tip against the real game state
 cs2coach/overlay.py      tkinter dark always-on-top window (theme.py = colours)
 tools/send_test_payload.py   fake CS2: replays a scripted round
 tests/fake_lmstudio.py       fake LM Studio for testing without a GPU
@@ -135,8 +150,8 @@ python coach_app.py --help
   --lmstudio-url URL     default http://127.0.0.1:1234
   --model ID             LM Studio model id (default: the loaded one)
   --temperature 0.3      --max-tokens 35      --llm-timeout 15
-  --interval 5           seconds between periodic analyses in a live round
-  --no-llm               rule-based coach only
+  --interval 8           seconds between AI tips in a live round
+  --no-llm               rules only, no AI tip line
   --no-overlay           console only
   --geometry +X+Y        overlay position (or WIDTHxHEIGHT+X+Y)
   --font-size 34   --alpha 0.92   --transparent (Windows: see-through background)
@@ -162,7 +177,7 @@ python coach_app.py
 python tools/send_test_payload.py
 ```
 
-Unit tests (31, covering parsing, triggers, LM Studio errors and timeouts, and stale answers):
+Unit tests (45, covering rules, AI-tip checks, triggers, LM Studio errors and timeouts, stale answers):
 
 ```bash
 python -m unittest discover -s tests -v
@@ -175,9 +190,11 @@ python -m unittest discover -s tests -v
 * **`● LM Studio: no model loaded`:** load a model in LM Studio.
 * **`● LM Studio: thinking model, use instruct`:** the loaded model always reasons before answering. Load a non-thinking instruct model (see *Which model?*). The coach retries every 15 s, so it recovers on its own once you switch.
 * **`● LM Studio: timeout` / slow answers:** use a smaller model, or raise `--llm-timeout`. The first request after loading can be slow.
-* **AI answers are vague or too long:** try a stronger instruct model (Llama 3.1 8B, Qwen2.5 7B). Replies are trimmed to one line of at most 8 words.
+* **No AI tip line appears:** the model's tips are being rejected or it replies `NONE`. Check the console for `AI tip rejected (...)`; a stronger instruct model (Llama 3.1 8B, Qwen2.5 7B) gets rejected less. The main call works either way.
 * **"Ignoring a payload with a missing or wrong auth token":** the `.cfg` token and `--token` differ.
 
 ## Limits
 
-While you are alive, GSI doesn't include your position, teammates' or enemies' state, or the round timer. The AI only knows your own situation, economy, score and bomb state. Calls like "rotate B" are its tactical judgement from that data, not something it can see.
+While you are alive, GSI doesn't include your position, teammates' or enemies' state, their money, or the round timer. So the coach cannot make map calls (rotations, sites, stacks) or team-economy calls. Those still come from your IGL. Loss-bonus advice uses CS2's own `consecutive_round_losses` value when CS2 sends it, and is skipped otherwise.
+
+**Official matches:** this tool doesn't read game memory or touch the game, but league and tournament rules (FACEIT, ESL and others) often forbid *any* outside real-time assistance during a match, whatever anti-cheat detects. Check the rules of the competition before using it there. It's best used in matchmaking/practice and for building habits.

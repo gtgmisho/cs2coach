@@ -20,10 +20,12 @@ sys.path.insert(0, os.path.join(HERE, "..", "tools"))
 sys.path.insert(0, HERE)
 
 from coach_app import CoachApp  # noqa: E402
+from cs2coach.coach import Coach  # noqa: E402
 from cs2coach.llm import (  # noqa: E402
     AnalysisJob, LLMError, LLMWorker, LMStudioClient, build_state_report, clean_command,
 )
 from cs2coach.state import parse_payload  # noqa: E402
+from cs2coach.validate import check_tip  # noqa: E402
 from fake_lmstudio import FakeLMStudio  # noqa: E402
 from send_test_payload import BASE, scripted_round  # noqa: E402
 
@@ -221,23 +223,67 @@ class ThinkingWorkerTests(unittest.TestCase):
             fake.stop()
 
 
+class ValidatorTests(unittest.TestCase):
+    """AI tips that don't fit the facts must never reach the overlay."""
+
+    def snap(self, frame):
+        s = parse_payload(scripted_round()[frame])
+        return s, Coach().advise(s)
+
+    def test_rejections(self):
+        cases = [
+            # (frame, tip, expected reason fragment or None if allowed)
+            (0, "Throw a flash before peeking", None),
+            (0, "Rotate B fast", "map area"),
+            (0, "Hold A site with AWP", "map area"),
+            (0, "Play mid with your team", "map area"),
+            (0, "Defuse now, you have kit", "without a planted bomb"),
+            (0, "Keep a flash for the retake", None),             # CT planning a retake: fine
+            (0, "NONE", "no tip"),
+            (0, "Buy full set and kit", "repeats"),
+            (1, "Buy an AWP next round", "buy advice during a live round"),
+            (6, "Throw utility before you peek", "stay alive"),   # main call: save your rifle
+            (6, "Hide and keep the rifle quiet", None),
+            (7, "Push with your team", "you are dead"),           # dead
+            (7, "Tell your team what killed you", None),
+        ]
+        for frame, tip, expected in cases:
+            with self.subTest(tip=tip):
+                s, main = self.snap(frame)
+                problem = check_tip(tip, s, main)
+                if expected is None:
+                    self.assertIsNone(problem)
+                else:
+                    self.assertIsNotNone(problem)
+                    self.assertIn(expected, problem)
+
+    def test_contradicting_the_save_call(self):
+        p = dict(BASE, player=dict(BASE["player"], state=dict(BASE["player"]["state"], money=1200)))
+        s = parse_payload(p)
+        main = Coach().advise(s)
+        self.assertEqual(main.key, "eco")
+        self.assertIn("contradicts", check_tip("Force buy pistols and armor", s, main))
+        self.assertIsNone(check_tip("Stack up and trade kills", s, main))
+
+
 class AppTests(unittest.TestCase):
     """CoachApp with a real worker against the fake LM Studio (console mode)."""
 
     def setUp(self):
-        self.fake = FakeLMStudio(reply="Defuse now, you have kit", delay=0.2).start()
+        self.fake = FakeLMStudio(reply="Throw a flash before peeking", delay=0.2).start()
         self.app = CoachApp()
         self.app.worker = LLMWorker(LMStudioClient(self.fake.url), self.app.on_llm_result,
                                     health_interval=0.2)
-        self.shown = []
+        self.shown = []   # (main text, level, tip) as posted to the overlay
 
         class Recorder:  # stands in for the Tk overlay
-            def post(_self, text, level="info"):
-                self.shown.append(text)
+            def post(_self, text, level="info", tip=""):
+                self.shown.append((text, level, tip))
         self.app.overlay = Recorder()
         # Keep the app's console output and logs out of the test report.
+        self.out = io.StringIO()
         self._quiet = contextlib.ExitStack()
-        self._quiet.enter_context(contextlib.redirect_stdout(io.StringIO()))
+        self._quiet.enter_context(contextlib.redirect_stdout(self.out))
         self._quiet.enter_context(self.assertLogs("cs2coach", level="INFO"))
         self.app.worker.start()
         self.assertTrue(wait_for(lambda: self.app.worker.status.usable))
@@ -247,33 +293,52 @@ class AppTests(unittest.TestCase):
         self.fake.stop()
         self._quiet.close()
 
-    def test_rules_first_then_ai(self):
+    def test_main_call_is_rules_and_ai_adds_a_tip(self):
         frames = scripted_round()
         self.app.on_payload(frames[0])                       # freezetime
-        self.assertEqual(self.shown[0], "Buy full set and kit")   # instant rule text
-        self.assertTrue(wait_for(lambda: self.shown[-1] == "Defuse now, you have kit"))
+        self.assertEqual(self.shown[0], ("Buy full set and kit", "info", ""))   # instant
+        self.assertTrue(wait_for(lambda: self.shown[-1] == ("Buy full set and kit", "info", "Throw a flash before peeking")))
         self.assertEqual(len(self.fake.requests), 1)
+        self.assertIn("MAIN CALL already shown to the player: Buy full set and kit",
+                      self.fake.requests[0]["messages"][1]["content"])
 
-        # Ammo/money-only changes in the same situation: no new request, AI text kept.
+        # Money-only change, same call: no new request, tip kept.
         p = dict(frames[0], player=dict(frames[0]["player"], state=dict(frames[0]["player"]["state"], money=5100)))
         self.app.on_payload(p)
         time.sleep(0.3)
         self.assertEqual(len(self.fake.requests), 1)
-        self.assertEqual(self.shown[-1], "Defuse now, you have kit")
+        self.assertEqual(self.shown[-1][2], "Throw a flash before peeking")
 
         segs = dict(self.app.status_segments())
         self.assertIn("● CS2 GSI", segs)
         self.assertIn("● LM Studio: test-model", segs)
+
+    def test_tip_disappears_when_the_call_changes(self):
+        frames = scripted_round()
+        self.app.on_payload(frames[0])
+        self.assertTrue(wait_for(lambda: self.shown[-1][2] == "Throw a flash before peeking"))
+        self.fake.delay = 1.0                                # next answer is slow
+        self.app.on_payload(frames[2])                       # live and flashed
+        self.assertEqual(self.shown[-1], ("Blind: fall back now", "danger", ""))
+
+    def test_invented_location_is_never_shown(self):
+        self.fake.reply = "Rotate B fast"
+        self.app.on_payload(scripted_round()[0])
+        self.assertTrue(wait_for(lambda: "AI tip rejected (mentions a map area" in self.out.getvalue()))
+        self.assertTrue(all(tip == "" for _, _, tip in self.shown))
 
     def test_stale_ai_answer_is_dropped(self):
         frames = scripted_round()
         self.app.on_payload(frames[0])        # request goes out for freezetime...
         self.assertTrue(wait_for(lambda: len(self.fake.requests) == 1))
         self.app.on_payload(frames[1])        # ...but the round goes live before it returns
-        time.sleep(0.8)
-        # Both answers arrive; only the one matching the live situation may be shown.
+        # Both answers arrive; only the one for the live situation may be shown.
+        self.assertTrue(wait_for(lambda: any(x[2] for x in self.shown)))
+        time.sleep(0.3)                       # give a wrongly accepted stale tip time to show
         self.assertEqual(len(self.fake.requests), 2)
-        self.assertEqual(self.shown.count("Defuse now, you have kit"), 1)
+        with_tip = [x for x in self.shown if x[2]]
+        self.assertEqual(len(with_tip), 1)
+        self.assertEqual(with_tip[0][0], "Stay near a teammate, trade")
 
     def test_burst_of_payloads_is_debounced(self):
         threads = [threading.Thread(target=self.app.on_payload, args=(BASE,)) for _ in range(20)]

@@ -52,6 +52,10 @@ class GameSnapshot:
     map_round: int = 0              # completed rounds so far (0 = pistol round)
     score_ct: int = 0
     score_t: int = 0
+    # Optional economy data (None/empty if CS2 doesn't send it):
+    loss_streak_ct: Optional[int] = None   # map.team_ct.consecutive_round_losses
+    loss_streak_t: Optional[int] = None
+    round_wins: Dict[str, str] = field(default_factory=dict)  # {"1": "ct_win_elimination", ...}
 
     # round
     round_phase: str = ""           # "freezetime", "live", "over"
@@ -124,9 +128,38 @@ class GameSnapshot:
         return any(w.name == "weapon_c4" for w in self.weapons)
 
     @property
+    def is_overtime(self) -> bool:
+        return self.map_round >= 24          # MR12: 24 rounds of regulation
+
+    @property
     def is_pistol_round(self) -> bool:
         # MR12: round 0 and round 12 (first round of the second half) are pistol rounds.
         return self.map_round in (0, 12)
+
+    @property
+    def my_score(self) -> int:
+        return self.score_ct if self.team == "CT" else self.score_t
+
+    @property
+    def enemy_score(self) -> int:
+        return self.score_t if self.team == "CT" else self.score_ct
+
+    @property
+    def my_loss_streak(self) -> Optional[int]:
+        return self.loss_streak_ct if self.team == "CT" else self.loss_streak_t
+
+    @property
+    def utility_count(self) -> int:
+        return len(self.grenades)
+
+    def round_winner(self, round_number: int) -> str:
+        """'CT', 'T' or '' for a finished round (1-based), from map.round_wins."""
+        result = self.round_wins.get(str(round_number), "")
+        if result.startswith("ct_"):
+            return "CT"
+        if result.startswith("t_"):
+            return "T"
+        return ""
 
 
 # ---- parsing ---------------------------------------------------------------
@@ -182,6 +215,9 @@ def parse_payload(payload: Dict[str, Any]) -> GameSnapshot:
         map_round=_int(map_.get("round")),
         score_ct=_int((map_.get("team_ct") or {}).get("score")),
         score_t=_int((map_.get("team_t") or {}).get("score")),
+        loss_streak_ct=_opt_int((map_.get("team_ct") or {}).get("consecutive_round_losses")),
+        loss_streak_t=_opt_int((map_.get("team_t") or {}).get("consecutive_round_losses")),
+        round_wins={str(k): str(v) for k, v in (map_.get("round_wins") or {}).items()},
         round_phase=str(round_.get("phase", "")),
         bomb=str(round_.get("bomb", "")),
         win_team=str(round_.get("win_team", "")),

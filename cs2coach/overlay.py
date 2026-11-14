@@ -6,7 +6,8 @@ mode. Exclusive fullscreen hides every other window, so put it on a second monit
 
 Layout:
     ┌──────────────────────────────────────────────┐
-    │            Buy full set, hold B               │  <- large centred command
+    │            Buy full set and kit               │  <- large centred main call (rules)
+    │        AI: Keep a flash for the retake        │  <- optional, smaller AI tip
     ├──────────────────────────────────────────────┤
     │ ● GSI   ● LM Studio: qwen2.5   HP 100  $4750 │  <- status bar
     └──────────────────────────────────────────────┘
@@ -31,7 +32,7 @@ import tkinter.font as tkfont
 from typing import Callable, List, Optional, Tuple
 
 from .theme import (
-    BAR_COLOR, BG_COLOR, DIVIDER_COLOR, GREEN, LEVEL_COLORS, MUTED, RED, StatusSegment,
+    BAR_COLOR, BG_COLOR, DIVIDER_COLOR, GREEN, LEVEL_COLORS, MUTED, RED, TIP_COLOR, StatusSegment,
 )
 
 log = logging.getLogger(__name__)
@@ -51,7 +52,7 @@ class Overlay:
         status_fn: Optional[StatusFn] = None,
         status_interval_ms: int = 500,
     ) -> None:
-        self._queue: "queue.Queue[Tuple[str, str]]" = queue.Queue()
+        self._queue: "queue.Queue[Tuple[str, str, str]]" = queue.Queue()
         self._status_fn = status_fn
         self._status_interval_ms = status_interval_ms
         self._drag_offset = (0, 0)
@@ -67,6 +68,7 @@ class Overlay:
         family = self._pick_font()
         self.big_font = tkfont.Font(family=family, size=font_size, weight="bold")
         self.small_font = tkfont.Font(family=family, size=11)
+        self.tip_font = tkfont.Font(family=family, size=max(11, font_size // 2), slant="italic")
 
         # The single large instruction field.
         self.instruction = tk.Label(
@@ -75,6 +77,12 @@ class Overlay:
         )
         self.instruction.pack(fill="both", expand=True)
 
+        # Optional smaller line for the AI's extra tip (hidden when empty).
+        self.tip = tk.Label(
+            self.root, text="", font=self.tip_font, fg=TIP_COLOR, bg=BG_COLOR,
+            padx=24, pady=0, justify="center",
+        )
+
         # Status bar: a 1-px divider, then a row of coloured segments.
         self.divider = tk.Frame(self.root, height=1, bg=DIVIDER_COLOR)
         self.divider.pack(fill="x")
@@ -82,13 +90,13 @@ class Overlay:
         self.status_bar.pack(fill="x")
 
         self._place_window(geometry)
-        self._bind_controls(self.root, self.instruction, self.status_bar)
+        self._bind_controls(self.root, self.instruction, self.tip, self.status_bar)
 
     # ---- public API (post() is safe to call from any thread) ---------------
 
-    def post(self, text: str, level: str = "info") -> None:
+    def post(self, text: str, level: str = "info", tip: str = "") -> None:
         """Queue a new instruction for display."""
-        self._queue.put((text, level))
+        self._queue.put((text, level, tip))
 
     def run(self) -> None:
         """Start the Tk event loop. Blocks until the window is closed."""
@@ -111,8 +119,9 @@ class Overlay:
         except queue.Empty:
             pass
         if latest is not None:
-            text, level = latest
+            text, level, tip = latest
             self.instruction.config(text=text, fg=LEVEL_COLORS.get(level, LEVEL_COLORS["info"]))
+            self._set_tip(tip)
         self.root.after(100, self._poll_queue)
 
     def _refresh_status(self) -> None:
@@ -137,6 +146,14 @@ class Overlay:
         for label, (text, color) in zip(self._status_labels, segments):
             if label.cget("text") != text or label.cget("fg") != color:
                 label.config(text=text, fg=color)
+
+    def _set_tip(self, tip: str) -> None:
+        if tip:
+            self.tip.config(text=f"AI: {tip}")
+            if not self.tip.winfo_ismapped():
+                self.tip.pack(after=self.instruction, fill="x", pady=(0, 10))
+        elif self.tip.winfo_ismapped():
+            self.tip.pack_forget()
 
     def _keep_on_top(self) -> None:
         # Some window managers drop "topmost" when another app goes fullscreen.
@@ -176,6 +193,7 @@ class Overlay:
             pos = f"+{(self.root.winfo_screenwidth() - width) // 2}+40"  # top-centre
 
         self.instruction.config(wraplength=width - 48)  # wrap instead of cutting off
+        self.tip.config(wraplength=width - 48)
         self.root.minsize(width, min_height)
         self.root.maxsize(width, 10_000)
         self.root.geometry(pos)
@@ -226,5 +244,5 @@ if __name__ == "__main__":
         ("● CS2 GSI", GREEN), ("● LM Studio: demo-model", GREEN),
         ("HP 64   $1850", MUTED), ("AI", MUTED),
     ])
-    demo.post("Save weapons & rotate B", "warn")
+    demo.post("Buy full set and kit", "info", "Keep a flash for the retake")
     demo.run()

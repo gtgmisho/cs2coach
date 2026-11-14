@@ -1,12 +1,15 @@
-"""Instant rule-based coach: the offline fallback for the local LLM.
+"""Rule-based coach: the MAIN call shown on the overlay.
 
-The overlay shows these commands while LM Studio is offline, still loading,
-or hasn't answered for the current game situation yet. They follow the same
-style as the AI: short, starting with an action verb.
+Rules are deterministic, instant, and only use facts CS2 actually sends, so
+they never invent things (enemy positions, map areas). The optional AI only
+adds a small extra tip under this call (see validate.py).
 
 Every rule is a plain function ``rule(snapshot) -> Advice | None``. All rules
-run on every update, and the Advice with the highest priority wins. The
-``level`` also sets the overlay's text colour for AI commands.
+run on every update and the Advice with the highest priority wins.
+
+Priority bands (higher wins):
+    1000 menu · 900 match state · 800 dead · 700 immediate danger
+    600 bomb · 550 low HP · 500 buy phase / round over · 400 ammo · 10-30 live defaults
 """
 
 from __future__ import annotations
@@ -17,14 +20,25 @@ from typing import Callable, List, Optional
 from .state import GameSnapshot
 
 # --- Tunable thresholds -----------------------------------------------------
-# Rough "full buy" costs: rifle + kevlar/helmet + some utility (+ kit for CT).
+# Rough full-buy costs: rifle + kevlar/helmet + utility (+ kit for CT).
 FULL_BUY_T = 4100
 FULL_BUY_CT = 4700
-ECO_BELOW = 2000            # under this, saving is usually right
+ECO_BELOW = 2000            # under this, saving is almost always right
+DROP_ABOVE = 4500           # money left after a full kit: enough to buy a teammate a rifle
+KIT_PRICE = 400
+MIN_UTILITY = 2             # grenades a full buy should have
 LOW_HP = 25
+SAVE_HP = 40                # CT, bomb down, no kit, this HP or less: save the gun
+SAVE_EQUIP = 3500           # ...if the equipment is worth at least this
 HEAVY_FLASH = 100           # GSI flashed value runs 0..255
 LOW_CLIP_RATIO = 0.3
 LAST_ROUND_OF_HALF = 11     # MR12: money resets after this round
+MATCH_POINT = 12            # MR12: 13 rounds wins
+
+
+def loss_bonus(losses: int) -> int:
+    """Approximate CS2 loss bonus after ``losses`` consecutive lost rounds."""
+    return 1400 + 500 * (min(max(losses, 1), 5) - 1)
 
 
 @dataclass(frozen=True)
@@ -32,10 +46,18 @@ class Advice:
     priority: int           # higher wins
     text: str               # what the overlay shows
     level: str = "info"     # "info" | "warn" | "danger": the overlay picks a colour from this
-    key: str = ""           # stable id of the rule outcome (used by tests and logs)
+    key: str = ""           # stable id of the rule outcome (tests, logs, AI-tip checks)
 
 
 Rule = Callable[[GameSnapshot], Optional[Advice]]
+
+
+def _full_buy(s: GameSnapshot) -> int:
+    return FULL_BUY_CT if s.team == "CT" else FULL_BUY_T
+
+
+def _has_primary(s: GameSnapshot) -> bool:
+    return s.primary is not None and s.primary.type != "Pistol"
 
 
 # --- Rules: match-level -----------------------------------------------------
@@ -65,36 +87,73 @@ def rule_dead_or_spectating(s: GameSnapshot) -> Optional[Advice]:
 
 
 # --- Rules: buy phase (freezetime) ------------------------------------------
+# CS2 updates your money and inventory live while you buy, so this advice
+# moves on step by step: buy gun/armor -> kit -> utility -> drop -> ready.
 
 def rule_buy_phase(s: GameSnapshot) -> Optional[Advice]:
-    if s.round_phase != "freezetime":
+    if s.round_phase != "freezetime" or not s.has_player_data:
         return None
+    a = _buy_advice(s)
+    return Advice(500, a[0], a[1], key=a[2]) if a else None
 
-    if s.is_pistol_round:
+
+def _buy_advice(s: GameSnapshot):
+    full_buy = _full_buy(s)
+    has_primary = _has_primary(s)
+
+    # 1. Pistol rounds
+    if s.is_pistol_round and not s.is_overtime:
+        if s.armor > 0 or s.has_defuse_kit or s.money < 300:
+            return ("Pistol round: play together, trade", "info", "pistol_ready")
         if s.team == "CT":
-            return Advice(500, "Buy kevlar or kit, play together", key="pistol")
-        return Advice(500, "Buy kevlar and flash, hit together", key="pistol")
+            return ("Pistol round: buy kevlar or kit", "info", "pistol")
+        return ("Pistol round: buy kevlar and flash", "info", "pistol")
 
-    if s.map_round == LAST_ROUND_OF_HALF:
-        return Advice(500, "Spend everything, last round of half", "warn", key="last_round_of_half")
+    # 2. Rounds where saving makes no sense
+    must_spend = (
+        s.map_round == LAST_ROUND_OF_HALF
+        or (not s.is_overtime and s.enemy_score == MATCH_POINT)
+    )
+    if must_spend and not has_primary and s.money < full_buy:
+        if s.map_round == LAST_ROUND_OF_HALF:
+            return ("Last round of half: force buy", "warn", "force_last_round")
+        return ("Enemy match point: force buy", "warn", "force_match_point")
 
-    full_buy = FULL_BUY_CT if s.team == "CT" else FULL_BUY_T
-    has_primary = s.primary is not None and s.primary.type != "Pistol"
-
+    # 3. Already equipped: kit, armor, utility, drop
     if has_primary:
         if s.armor < 50 and s.money >= 1000:
-            return Advice(500, "Keep your gun, buy armor", key="keep_gun")
-        return Advice(500, "Top up your utility", key="keep_gun")
+            return ("Keep your gun, buy armor", "info", "buy_armor")
+        if s.team == "CT" and not s.has_defuse_kit and s.money >= KIT_PRICE:
+            return ("Buy a defuse kit", "info", "buy_kit")
+        if s.utility_count < MIN_UTILITY and s.money >= 300:
+            return ("Buy utility: smoke and flash", "info", "buy_utility")
+        if s.money >= DROP_ABOVE:
+            return ("Drop a rifle for a teammate", "info", "drop")
+        return ("Ready: play your position", "info", "ready")
 
+    # 4. Second round after a pistol round
+    if s.map_round in (1, 13) and not s.is_overtime:
+        won = s.round_winner(s.map_round)          # map_round == number of the pistol round
+        if not won and s.map_round == 1:
+            won = s.team if s.my_score == 1 else ("T" if s.team == "CT" else "CT")
+        if won == s.team:
+            return ("Won pistol: armor and SMG", "info", "anti_eco")
+        if won:
+            return ("Lost pistol: full save", "warn", "eco")
+
+    # 5. Normal rounds: full buy, eco or save for next round
     if s.money >= full_buy:
-        if s.team == "CT" and not s.has_defuse_kit:
-            return Advice(500, "Buy full set and kit", key="full_buy")
-        return Advice(500, "Buy full set", key="full_buy")
+        if s.team == "CT":
+            return ("Buy full set and kit", "info", "full_buy")
+        return ("Buy full set", "info", "full_buy")
 
+    streak = s.my_loss_streak
+    if streak is not None and s.money + loss_bonus(streak + 1) >= full_buy:
+        # Even if this round is lost, saving guarantees a full buy next round.
+        return ("Save now, full buy next round", "warn", "save_for_next")
     if s.money < ECO_BELOW:
-        return Advice(500, "Save money, eco round", "warn", key="eco")
-
-    return Advice(500, "Follow team call: force or save", "warn", key="follow_team")
+        return ("Save money, eco round", "warn", "eco")
+    return ("Follow team call: force or save", "warn", "follow_team")
 
 
 # --- Rules: live round ------------------------------------------------------
@@ -122,6 +181,8 @@ def rule_bomb_planted(s: GameSnapshot) -> Optional[Advice]:
         return Advice(600, "Guard the bomb, hold crossfire", key="bomb_t")
     if s.has_defuse_kit:
         return Advice(600, "Clear angles, then defuse", "warn", key="bomb_ct_kit")
+    if s.health <= SAVE_HP and s.equip_value >= SAVE_EQUIP:
+        return Advice(615, "Save your rifle, don't retake", "warn", key="save_weapon")
     return Advice(610, "No kit! Retake only with time", "danger", key="bomb_ct_no_kit")
 
 
@@ -139,6 +200,12 @@ def rule_low_ammo(s: GameSnapshot) -> Optional[Advice]:
         return None
     if w.ammo_clip / w.ammo_clip_max <= LOW_CLIP_RATIO and (w.ammo_reserve or 0) > 0:
         return Advice(400, "Reload behind cover", "warn", key="low_ammo")
+    return None
+
+
+def rule_bomb_carrier(s: GameSnapshot) -> Optional[Advice]:
+    if _alive_self_live(s) and s.team == "T" and s.has_bomb and s.bomb != "planted":
+        return Advice(30, "Bomb carrier: stay with team", key="bomb_carrier")
     return None
 
 
@@ -170,6 +237,7 @@ RULES: List[Rule] = [
     rule_bomb_planted,
     rule_low_hp,
     rule_low_ammo,
+    rule_bomb_carrier,
     rule_live_default,
     rule_round_over,
 ]

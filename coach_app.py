@@ -10,11 +10,12 @@ Data flow (every arrow is a separate, non-blocking hand-off):
 
     CS2 ──HTTP POST──▶ GSIServer thread ──▶ CoachApp.on_payload()
                                                │  parse → GameSnapshot
-                                               │  rules  → instant fallback text
+                                               │  rules → MAIN CALL (always shown, instant)
                                                │  AnalysisTrigger: meaningful change?
                                                ▼
                                    LLMWorker thread ──HTTP──▶ LM Studio (127.0.0.1:1234)
-                                               │  short IGL command
+                                               │  optional extra tip
+                                               │  validate.check_tip: fits the facts?
                                                ▼
                                    Overlay (Tk main thread, via queue)
 
@@ -34,17 +35,21 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from cs2coach.coach import Coach
+from cs2coach.coach import Advice, Coach
 from cs2coach.gsi_server import GSIServer
 from cs2coach.llm import AnalysisJob, LLMWorker, LMStudioClient, build_state_report
 from cs2coach.theme import AMBER, GREEN, MUTED, RED, TEXT, StatusSegment
 from cs2coach.state import GameSnapshot, format_summary, parse_payload
 from cs2coach.trigger import AnalysisTrigger, situation_key
+from cs2coach.validate import check_tip
 
 DEFAULT_PORT = 3000
 DEFAULT_TOKEN = "cs2coach_local_token"   # must match "auth" > "token" in the .cfg
 DEFAULT_LMSTUDIO = "http://127.0.0.1:1234"
 GSI_STALE_S = 15.0                       # GSI heartbeat is 10 s, so 15 s of silence = lost
+CALL_CHANGE_DEBOUNCE_S = 3.0             # min gap between AI requests caused by a new main call
+# No AI tip for these calls: nothing useful to add, or the moment passes too fast.
+NO_TIP_CALLS = {"menu", "warmup", "gameover", "burning", "flashed"}
 
 log = logging.getLogger("cs2coach")
 
@@ -60,10 +65,11 @@ class CoachApp:
     refresh), so all shared state is guarded by ``self._lock``.
 
     What the overlay shows:
-      * an AI command, while it still matches the current situation
-        (same round, phase, bomb state, alive/dead);
-      * otherwise the instant rule-based command (LM Studio offline, still
-        thinking, or the situation just changed).
+      * big line: the rule-based MAIN CALL, always. It is deterministic,
+        instant and only uses facts CS2 really sends;
+      * small line: an AI tip, only for exactly this main call and situation,
+        and only if it passed validate.check_tip. It disappears as soon as the
+        call or situation changes.
     """
 
     def __init__(self, dump_dir: Optional[Path] = None, trigger: Optional[AnalysisTrigger] = None) -> None:
@@ -76,9 +82,17 @@ class CoachApp:
         self._lock = threading.RLock()
         self._snapshot: Optional[GameSnapshot] = None
         self._last_payload_at: Optional[float] = None
-        self._ai_key: Optional[tuple] = None      # situation the shown AI command belongs to
-        self._shown: Tuple[str, str, str] = ("", "", "")   # (text, level, source)
+        self._tip = ""                            # last accepted AI tip...
+        self._tip_key: Optional[tuple] = None     # ...and the call/situation it belongs to
+        self._shown: Tuple[str, str, str] = ("", "", "")   # (main text, level, tip)
+        self._last_job_key: Optional[tuple] = None
+        self._last_submit = -1e9
         self._last_summary = ""
+
+    @staticmethod
+    def _key(s: GameSnapshot, main: Advice) -> tuple:
+        """The exact situation + main call an AI tip is written for."""
+        return situation_key(s) + (main.key,)
 
     # ---- inputs --------------------------------------------------------------
 
@@ -103,42 +117,57 @@ class CoachApp:
             if self._snapshot is not None:
                 self._evaluate()
 
-    def on_llm_result(self, job: AnalysisJob, command: str, elapsed: float) -> None:
-        """LLM worker thread: a command for the situation in ``job``."""
+    def on_llm_result(self, job: AnalysisJob, tip: str, elapsed: float) -> None:
+        """LLM worker thread: an AI tip for the situation in ``job``."""
         with self._lock:
             s = self._snapshot
-            if s is None or situation_key(s) != job.key:
-                log.debug("Dropping stale AI command %r (%s)", command, job.reason)
+            if s is None:
                 return
-            self._ai_key = job.key
-            print(f"{'':10}AI [{job.reason}, {elapsed:.1f}s]: {command}", flush=True)
-            self._show(command, self.rules.advise(s).level, "AI")
+            main = self.rules.advise(s)
+            if self._key(s, main) != job.key:
+                log.debug("Dropping stale AI tip %r (%s)", tip, job.reason)
+                return
+            problem = check_tip(tip, s, main)
+            if problem:
+                if problem != "no tip":
+                    print(f"{'':10}AI tip rejected ({problem}): {tip}", flush=True)
+                return
+            self._tip, self._tip_key = tip, job.key
+            print(f"{'':10}AI tip [{job.reason}, {elapsed:.1f}s]: {tip}", flush=True)
+            self._render(s, main)
 
     # ---- core logic (caller holds the lock) -----------------------------------
 
     def _evaluate(self) -> None:
         s = self._snapshot
-        rule = self.rules.advise(s)
-        key = situation_key(s)
+        main = self.rules.advise(s)
+        key = self._key(s, main)
+        now = time.monotonic()
 
-        reason = self.trigger.check(s, time.monotonic())
-        if reason and self.worker is not None:
-            self.worker.submit(AnalysisJob(build_state_report(s), key, reason))
+        reason = self.trigger.check(s, now)
+        if (
+            not reason
+            and key != self._last_job_key
+            and s.has_player_data
+            and now - self._last_submit >= CALL_CHANGE_DEBOUNCE_S
+        ):
+            reason = f"new call: {main.key}"
+        if reason and self.worker is not None and main.key not in NO_TIP_CALLS:
+            self.worker.submit(AnalysisJob(build_state_report(s, main.text), key, reason))
+            self._last_job_key, self._last_submit = key, now
 
-        ai_fresh = (
-            self.worker is not None and self.worker.status.usable and self._ai_key == key
-        )
-        if not ai_fresh:
-            self._show(rule.text, rule.level, "rules")
+        self._render(s, main)
 
-    def _show(self, text: str, level: str, source: str) -> None:
-        if (text, level, source) == self._shown:
+    def _render(self, s: GameSnapshot, main: Advice) -> None:
+        tip = self._tip if self._tip_key == self._key(s, main) else ""
+        shown = (main.text, main.level, tip)
+        if shown == self._shown:
             return
-        self._shown = (text, level, source)
-        if source == "rules":
-            print(f"{'':10}rules: {text}", flush=True)
+        if main.text != self._shown[0]:
+            print(f"{'':10}call: {main.text}", flush=True)
+        self._shown = shown
         if self.overlay is not None:
-            self.overlay.post(text, level)
+            self.overlay.post(main.text, main.level, tip)
 
     # ---- status bar ----------------------------------------------------------
 
@@ -147,7 +176,6 @@ class CoachApp:
         with self._lock:
             last = self._last_payload_at
             s = self._snapshot
-            source = self._shown[2]
 
         if last is None:
             segments = [("● CS2 GSI: waiting", AMBER)]
@@ -159,8 +187,6 @@ class CoachApp:
         segments.append(self._llm_segment())
         if s is not None and s.has_player_data:
             segments.append((f"HP {s.health}   ${s.money}", TEXT))
-        if source:
-            segments.append(("AI" if source == "AI" else "rules", MUTED))
         return segments
 
     def _llm_segment(self) -> StatusSegment:
@@ -199,13 +225,13 @@ def parse_args(argv=None) -> argparse.Namespace:
     g.add_argument("--dump-payloads", type=Path, metavar="DIR", help="save every raw payload to DIR")
 
     g = p.add_argument_group("LM Studio")
-    g.add_argument("--no-llm", action="store_true", help="rule-based coach only")
+    g.add_argument("--no-llm", action="store_true", help="rules only, no AI tip line")
     g.add_argument("--lmstudio-url", default=DEFAULT_LMSTUDIO, help="LM Studio server base URL")
     g.add_argument("--model", help="model id to use (default: the model loaded in LM Studio)")
     g.add_argument("--temperature", type=float, default=0.3)
     g.add_argument("--max-tokens", type=int, default=35)
     g.add_argument("--llm-timeout", type=float, default=15.0, help="seconds per request")
-    g.add_argument("--interval", type=float, default=5.0, help="re-analyse every N s in a live round")
+    g.add_argument("--interval", type=float, default=8.0, help="new AI tip every N s in a live round")
 
     g = p.add_argument_group("Overlay")
     g.add_argument("--no-overlay", action="store_true", help="console output only")

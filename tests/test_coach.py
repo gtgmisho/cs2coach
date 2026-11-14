@@ -6,6 +6,7 @@ Run from the project folder:  python -m unittest discover -s tests -v
 import copy
 import json
 import os
+import re
 import sys
 import time
 import unittest
@@ -59,7 +60,7 @@ class CoachTests(unittest.TestCase):
         keys = [coach.advise(parse_payload(p)).key for p in scripted_round()]
         self.assertEqual(keys, [
             "full_buy", "live", "flashed", "live", "low_ammo",
-            "low_hp", "bomb_ct_no_kit", "dead", "round_lost",
+            "low_hp", "save_weapon", "dead", "round_lost",
         ])
 
     def test_eco(self):
@@ -70,9 +71,65 @@ class CoachTests(unittest.TestCase):
         s = parse_payload(payload(**{"round.phase": "live", "player.steamid": "someone_else"}))
         self.assertEqual(Coach().advise(s).key, "dead")
 
+    def key(self, **changes):
+        return Coach().advise(parse_payload(payload(**changes))).key
+
+    def test_buy_phase_step_by_step(self):
+        """CS2 updates inventory live while buying; the call moves on each step."""
+        rifle = {"name": "weapon_m4a1", "type": "Rifle", "state": "active",
+                 "ammo_clip": 30, "ammo_clip_max": 30, "ammo_reserve": 90}
+        smoke = {"name": "weapon_smokegrenade", "type": "Grenade", "state": "holstered"}
+        flash = {"name": "weapon_flashbang", "type": "Grenade", "state": "holstered"}
+        w = dict(BASE["player"]["weapons"], weapon_2=rifle)
+        armored = {"player.state.armor": 100, "player.state.helmet": True}
+        self.assertEqual(self.key(**{"player.weapons": w, "player.state.money": 2200}), "buy_armor")
+        self.assertEqual(self.key(**{"player.weapons": w, "player.state.money": 1200, **armored}), "buy_kit")
+        kit = {"player.state.defusekit": True, **armored}
+        self.assertEqual(self.key(**{"player.weapons": w, "player.state.money": 800, **kit}), "buy_utility")
+        w2 = dict(w, weapon_3=smoke, weapon_4=flash)
+        self.assertEqual(self.key(**{"player.weapons": w2, "player.state.money": 5000, **kit}), "drop")
+        self.assertEqual(self.key(**{"player.weapons": w2, "player.state.money": 300, **kit}), "ready")
+
+    def test_loss_bonus_save_for_next_round(self):
+        # $2500 now; after another loss (3rd in a row) the bonus gets CT to a full buy.
+        self.assertEqual(self.key(**{"player.state.money": 2500, "map.team_ct.consecutive_round_losses": 2}),
+                         "save_for_next")
+        # Without loss-streak data the coach falls back to "follow the team".
+        self.assertEqual(self.key(**{"player.state.money": 2500}), "follow_team")
+
+    def test_force_rounds(self):
+        self.assertEqual(self.key(**{"player.state.money": 2500, "map.round": 11}), "force_last_round")
+        self.assertEqual(self.key(**{"player.state.money": 2500, "map.team_t.score": 12}), "force_match_point")
+
+    def test_pistol_rounds(self):
+        self.assertEqual(self.key(**{"map.round": 0, "player.state.money": 800}), "pistol")
+        self.assertEqual(self.key(**{"map.round": 0, "player.state.money": 150, "player.state.armor": 100}),
+                         "pistol_ready")
+        self.assertEqual(self.key(**{"map.round": 24}), "full_buy")          # overtime: no pistol round
+        won = {"map.round": 1, "player.state.money": 3000, "map.round_wins": {"1": "ct_win_elimination"}}
+        lost = {"map.round": 1, "player.state.money": 3000, "map.round_wins": {"1": "t_win_bomb"}}
+        self.assertEqual(self.key(**won), "anti_eco")
+        self.assertEqual(self.key(**lost), "eco")
+        self.assertEqual(self.key(**{"map.round": 1, "player.state.money": 3000,
+                                     "map.team_ct.score": 0, "map.team_t.score": 1}), "eco")
+
+    def test_live_round_rules(self):
+        live = {"round.phase": "live"}
+        self.assertEqual(self.key(**live, **{"player.state.burning": 200}), "burning")
+        self.assertEqual(self.key(**live, **{"round.bomb": "planted", "player.state.defusekit": True}),
+                         "bomb_ct_kit")
+        c4 = dict(BASE["player"]["weapons"], weapon_5={"name": "weapon_c4", "type": "C4", "state": "holstered"})
+        self.assertEqual(self.key(**live, **{"player.team": "T", "player.weapons": c4}), "bomb_carrier")
+        self.assertEqual(self.key(**live, **{"player.team": "T", "round.bomb": "planted"}), "bomb_t")
+
     def test_all_texts_are_short(self):
-        for p in scripted_round():
-            self.assertLessEqual(len(Coach().advise(parse_payload(p)).text.split()), 6)
+        import inspect
+        from cs2coach import coach
+        texts = set(re.findall(r'\("([^"]+)", "(?:info|warn|danger)"', inspect.getsource(coach)))
+        texts |= set(re.findall(r'Advice\(\d+, "([^"]+)"', inspect.getsource(coach)))
+        self.assertGreater(len(texts), 25)
+        for text in texts:
+            self.assertLessEqual(len(text.split()), 6, text)
 
 
 class TriggerTests(unittest.TestCase):

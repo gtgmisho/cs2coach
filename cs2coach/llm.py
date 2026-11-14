@@ -28,25 +28,18 @@ from .state import GameSnapshot
 log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are an elite Counter-Strike 2 in-game leader (IGL) coaching ONE player in real time.
-You receive a short report of that player's current game state.
+You assist a Counter-Strike 2 player with ONE short extra tip, in English.
 
-Reply with exactly ONE tactical command in English:
-- 4 to 6 words maximum.
-- Start with an imperative action verb (Buy, Hold, Play, Rotate, Save, Wait, Push, Defuse, Retake, Fall back...).
-- Use normal CS2 jargon (rush, eco, force, AWP, smoke, flash, crossfire, retake, trade).
-- Output ONLY the command: no explanation, no quotes, no emojis.
+You receive the player's situation as facts, and the MAIN CALL the player already sees
+on screen. The main call is correct; do not repeat it or argue with it.
 
-Decide from: side (CT defends sites, T attacks and plants), round phase, economy, HP and armor,
-weapons, bomb state and score. In freezetime give a buy call. After a plant, play post-plant (T)
-or retake/defuse (CT). With low HP or a bad gun, play for info or save.
-
-Examples of valid replies:
-Buy full set, hold B
-Rush A fast together
-Save your rifle, don't retake
-Defuse now, you have kit
-Save money, eco round"""
+Strict rules:
+- Use only the facts given. You do NOT know anyone's position, map areas, where enemies are,
+  teammates' money or the round timer. Never mention sites (A, B), callouts or rotations.
+- Add something different that helps right now, for example: utility to throw or keep,
+  economy for next round, trading, crosshair placement, communication, staying alive.
+- Maximum 8 words, start with a verb, no quotes, no explanation.
+- If there is nothing useful to add, reply exactly: NONE"""
 
 _PHASE_TEXT = {
     "freezetime": "freezetime (buy phase)",
@@ -55,7 +48,7 @@ _PHASE_TEXT = {
 }
 
 
-def build_state_report(s: GameSnapshot) -> str:
+def build_state_report(s: GameSnapshot, main_call: str = "") -> str:
     """A compact, factual description of the current situation for the LLM."""
     side = {"CT": "CT (defending)", "T": "T (attacking)"}.get(s.team, s.team or "unknown")
     phase = _PHASE_TEXT.get(s.round_phase, s.round_phase or "unknown")
@@ -110,6 +103,11 @@ def build_state_report(s: GameSnapshot) -> str:
         lines.append("Note: pistol round")
     elif s.map_round == 11:
         lines.append("Note: last round of the half, money resets after it")
+    if s.my_loss_streak is not None:
+        lines.append(f"My team's consecutive lost rounds: {s.my_loss_streak}")
+    lines.append(f"Score for my team: {s.my_score}, enemy: {s.enemy_score} (13 wins)")
+    if main_call:
+        lines.append(f"MAIN CALL already shown to the player: {main_call}")
     return "\n".join(lines)
 
 
@@ -247,7 +245,7 @@ class LMStudioClient:
         return ids[0]
 
     def get_command(self, report: str, model: str) -> str:
-        """Ask the model for one short English command. Raises LLMError.
+        """Ask the model for one short English tip. Raises LLMError.
 
         "Thinking" (reasoning) models spend the small token budget on hidden
         reasoning and never reach the answer. Hybrid models such as Qwen3 skip
